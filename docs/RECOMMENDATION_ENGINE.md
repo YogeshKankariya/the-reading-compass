@@ -1,0 +1,818 @@
+# Recommendation Engine — The Reading Compass
+
+**Document version:** 1.1  
+**Status:** Finalized for MVP design  
+**Last updated:** 2026-11-01
+
+---
+
+## 1. Purpose
+
+The recommendation engine is the core personalization system of **The Reading Compass**. It should help a reader decide what to read next, prioritize books already in their TBR list, discover relevant books outside their usual interests, and build structured reading journeys around learning goals.
+
+The engine must be more than an LLM prompt that returns book titles. It should use catalogue data, reader preferences, interaction history, semantic retrieval, explicit ranking features, and measurable evaluation.
+
+**Core separation of responsibilities:**
+
+- The recommendation engine retrieves, filters, scores, ranks, and diversifies books.
+- The LLM helps interpret natural-language requests, structure reading goals, and explain recommendations using evidence supplied by the engine.
+- The database stores catalogue data, reader activity, recommendation results, and algorithm versions.
+
+The LLM must not invent catalogue entries or independently decide the final ranking.
+
+## 2. Confirmed design decisions
+
+The following choices were confirmed during review and are the approved MVP defaults:
+
+| Area | Final decision | Implementation direction |
+|---|---|---|
+| Initial ranking | Hybrid weighted scoring baseline | Combine normalized semantic, goal, topic, author, difficulty, and novelty signals using configurable weights |
+| Diversity | MMR + soft author/genre limits | Apply Maximal Marginal Relevance after relevance ranking; do not force diversity when the request is narrow |
+| Reader profile | Hybrid profile | Combine explicit onboarding preferences, behavioral signals, and embeddings; explicit preferences carry greater weight initially |
+| Journey sequencing | Subject prerequisite DAG | Represent subject dependencies as a directed acyclic graph and use topological ordering where relationships are reliable |
+| Feedback updates | Incremental/deterministic | Update reader-profile features from recorded interactions without retraining a model after every event |
+
+These are the approved MVP design choices. The numerical ranking weights, MMR parameter, interaction weights, and confidence thresholds remain configurable hyperparameters to be evaluated and tuned; confirming the approach does not mean the initial numeric values are empirically validated.
+
+## 2. Goals and non-goals
+
+### 2.1 Goals
+
+1. Recommend books relevant to a reader's interests, goals, reading level, and context.
+2. Provide useful recommendations even when a user has little or no interaction history.
+3. Prioritize a user's existing TBR list when requested.
+4. Balance relevance with diversity, novelty, and discovery.
+5. Explain why each book was recommended using traceable signals.
+6. Improve personalization from explicit feedback and observed interactions.
+7. Support goal-oriented reading journeys with sensible progression.
+8. Evaluate recommendation quality using offline metrics and beta-user feedback.
+
+### 2.2 Non-goals for the MVP
+
+- Training a large recommendation model from scratch.
+- Collaborative filtering that depends on a large user base.
+- Automatically treating popularity as quality.
+- Letting an LLM fabricate books, metadata, ratings, or availability.
+- Claiming that a reading sequence is academically authoritative when prerequisite data is incomplete.
+- Building a complex real-time streaming recommendation platform.
+
+## 3. Recommendation use cases
+
+| Use case | Input | Expected behavior |
+|---|---|---|
+| What should I read next? | Reader profile, current goal, library, recent activity | Recommend a balanced shortlist |
+| Discover something new | Interests plus exploration preference | Include relevant books beyond familiar genres/authors |
+| Prioritize my TBR | Existing TBR list and current goal/context | Rank only books already in the TBR list |
+| Recommend for a goal | Goal such as learning economics | Retrieve and rank books relevant to the goal |
+| Recommend by mood | Natural-language mood or desired experience | Translate request into validated search features |
+| Find a new author | Authors already read/liked | Recommend relevant works by authors not yet explored |
+| Build a reading journey | Learning goal and reader level | Create ordered stages with books for each stage |
+
+## 4. Inputs and outputs
+
+### 4.1 Inputs
+
+The engine may use:
+
+- Explicit onboarding preferences: genres, subjects, languages, preferred length, reading level, and goals.
+- Reader profile: beginner, casual, avid, or knowledge-oriented.
+- Personal library: want-to-read, currently reading, completed, paused, and abandoned works.
+- Ratings and feedback: likes, dislikes, saves, dismissals, and ratings.
+- Interaction events: views, clicks, starts, progress updates, and completions.
+- Current request context: next-read, discovery, TBR prioritization, goal-based, mood-based, or author discovery.
+- Catalogue metadata: title, description, authors, genres, subjects, language, publication details, difficulty, and page count where available.
+- Book embeddings: 384-dimensional work-level vectors.
+
+Not every field will be available for every book or reader. Missing metadata must be handled explicitly rather than silently treated as a negative signal.
+
+### 4.2 Output
+
+A recommendation response should include:
+
+- Recommended work ID and display metadata.
+- Rank position.
+- Final score and optional component-score breakdown.
+- Structured reason codes.
+- Algorithm/configuration version.
+- Optional warnings where metadata is incomplete.
+
+The API should return a stable, explainable result rather than only a list of titles.
+
+## 5. Book representation
+
+Each book work should have a structured catalogue representation and a semantic representation.
+
+### 5.1 Structured features
+
+Potential features include:
+
+- Genres and subjects.
+- Author IDs.
+- Language.
+- Reading difficulty, if curated or reliably sourced.
+- Page count or estimated length, preferably edition-aware.
+- Publication period.
+- Metadata quality/completeness.
+- Prerequisite subject relationships, where available.
+
+Use normalized IDs for authors, genres, and subjects. Avoid relying only on raw text labels because spelling variations and inconsistent provider metadata can fragment the catalogue.
+
+### 5.2 Semantic text document
+
+Create a consistent text document for each work using selected fields, for example:
+
+```text
+Title: Thinking, Fast and Slow
+Authors: Daniel Kahneman
+Description: An exploration of how human thinking uses fast intuitive
+and slower deliberate processes.
+Genres: Nonfiction, Psychology
+Subjects: Cognitive psychology, Decision-making, Behavioral economics
+Language: English
+```
+
+The exact fields and formatting should be versioned. Do not include noisy or unverified metadata simply because it is available.
+
+### 5.3 Embeddings
+
+The database schema specifies 384 dimensions. An initial candidate is:
+
+`sentence-transformers/all-MiniLM-L6-v2`
+
+This is a candidate model, not an irreversible choice. Benchmark it on representative catalogue descriptions and real search queries before generating embeddings at scale.
+
+Store:
+
+- Work ID.
+- Model name and pinned revision.
+- Embedding vector.
+- Hash of the source text used to generate it.
+- Generation timestamp.
+
+Generate embeddings at the work level, not separately for every edition. Regenerate when the source document or model revision changes.
+
+### 5.4 Metadata quality
+
+A book with missing description, language, or subject tags should not automatically receive a poor relevance score. Track metadata completeness and use it to:
+
+- Reduce confidence in affected features.
+- Avoid generating unsupported explanations.
+- Identify catalogue records that need enrichment or review.
+
+## 6. Reader representation
+
+A reader representation combines explicit preferences and behavioral signals. It should be transparent, updateable, and robust to sparse data.
+
+### 6.1 Explicit reader profile
+
+Start with onboarding choices:
+
+- Favorite genres and subjects.
+- Topics the reader wants to learn.
+- Preferred languages.
+- Preferred book length.
+- Self-described reading level.
+- Current goals.
+- Authors or books they already enjoy, if supplied.
+
+Explicit preferences should have higher trust than weak inferred signals. Users must be able to edit or remove them.
+
+### 6.2 Interaction signals
+
+Store events in `user_interactions`. Initial signal strengths are hypotheses for experimentation, not fixed truths.
+
+| Interaction | Initial interpretation | Notes |
+|---|---|---|
+| High rating | Strong positive | Use the actual rating value |
+| Low rating | Strong negative | Do not infer dislike from a single ambiguous event without context |
+| Save to TBR | Positive interest | Stronger than a view |
+| Click/open details | Weak positive | May reflect curiosity, not preference |
+| Dismiss recommendation | Negative for this recommendation | Avoid assuming dislike of its entire genre |
+| Start reading | Positive intent | Does not prove satisfaction |
+| Complete book | Engagement signal | Completion alone is not necessarily a positive rating |
+| Abandon book | Ambiguous/possibly negative | Could be due to timing, difficulty, or life circumstances |
+
+### 6.3 Reader interest vector
+
+For a reader with enough interaction history, a simple initial profile vector can be formed from book embeddings:
+
+\[
+p_u = \operatorname{normalize}\left(
+\sum_{i \in P_u} w_i e_i -
+\alpha \sum_{j \in N_u} v_j e_j
+\right)
+\]
+
+Where:
+
+- \(e_i\) is a book embedding.
+- \(P_u\) is the set of positive interactions.
+- \(N_u\) is the set of sufficiently clear negative interactions.
+- \(w_i\) and \(v_j\) are interaction weights.
+- \(\alpha\) controls the influence of negative feedback.
+- `normalize` scales the resulting vector to unit length.
+
+This is a baseline, not a claim that one vector captures a reader's entire identity. Readers may have several independent interests. The implementation can later maintain separate interest vectors by goal or subject.
+
+Do not subtract weak or ambiguous signals as if they were explicit dislikes.
+
+### 6.4 Combining explicit and inferred preferences
+
+For cold-start and early-stage users, combine onboarding preferences with interaction-derived signals:
+
+\[
+p_u = \operatorname{normalize}(\beta p_{\text{explicit}} +
+(1-\beta)p_{\text{behavioral}})
+\]
+
+The value of \(\beta\) should depend on the amount and reliability of behavioral data. Initially, explicit preferences should dominate. As meaningful interactions accumulate, the behavioral component can gain influence.
+
+Keep the source of each preference distinguishable so users can correct inaccurate inferences.
+
+## 7. Candidate generation
+
+Candidate generation finds a manageable pool of potentially relevant works. Ranking then orders that pool.
+
+Use multiple retrieval paths and combine their results.
+
+### 7.1 Semantic retrieval
+
+Use pgvector to retrieve works whose embeddings are close to:
+
+- The reader's interest vector.
+- A natural-language query embedding.
+- A goal or subject embedding.
+- An embedding of a book the reader liked, when relevant.
+
+Semantic retrieval helps discover books with related ideas even when they do not share exact keywords.
+
+### 7.2 Metadata retrieval
+
+Retrieve candidates using structured filters and relationships:
+
+- Selected genres and subjects.
+- Preferred language.
+- Reading difficulty.
+- Length constraints.
+- Author exclusions or author discovery constraints.
+- Subject relationships relevant to a learning goal.
+
+### 7.3 Text retrieval
+
+Use PostgreSQL full-text and trigram search for title, author, and topic queries. This is especially important for exact-title searches, misspellings, and names that semantic search may not handle precisely.
+
+### 7.4 Exploration candidates
+
+A small exploration pool can introduce:
+
+- A new author in a familiar subject.
+- A neighboring subject.
+- A less familiar genre related to the user's goal.
+- A well-described catalogue work outside the reader's strongest interest cluster.
+
+Exploration must remain relevant to the request. Random books should not be inserted merely to increase diversity.
+
+### 7.5 Candidate union and deduplication
+
+Combine candidate IDs from retrieval paths, deduplicate by canonical `work_id`, and retain retrieval metadata such as source and retrieval score.
+
+An initial MVP may retrieve a few hundred candidates, then filter and rank them down to the requested result count. Tune pool size with latency and recall measurements.
+
+## 8. Filtering and eligibility
+
+Apply hard constraints before ranking.
+
+Typical rules:
+
+1. Exclude works already completed when the request is “what should I read next,” unless the user asks for rereads.
+2. Exclude works the user explicitly dismissed for the current context, subject to a configurable expiry or override.
+3. For TBR prioritization, only consider works in the user's TBR list.
+4. Respect language and other explicit hard filters.
+5. Exclude unavailable or invalid catalogue records.
+6. Avoid recommending a work already being read unless the request asks for a continuation or alternative.
+7. Do not exclude a work solely because it has incomplete metadata if it can still be evaluated safely.
+
+Filtering rules should vary by request type. For example, a discovery request may include books not yet in the user's library, while a TBR request must not introduce new books into the ranked list.
+
+## 9. Hybrid ranking model
+
+After candidate generation and filtering, calculate a score for each eligible work.
+
+### 9.1 Initial scoring formula
+
+A practical MVP baseline is:
+
+\[
+S(u,b,c) =
+0.35\,S_{\text{semantic}} +
+0.20\,S_{\text{goal}} +
+0.15\,S_{\text{topic}} +
+0.10\,S_{\text{author}} +
+0.10\,S_{\text{difficulty}} +
+0.10\,S_{\text{novelty}}
+\]
+
+Where:
+
+- `semantic`: similarity to the reader or request representation.
+- `goal`: relevance to the current reading goal.
+- `topic`: match with explicit genre and subject preferences.
+- `author`: affinity for the author, including a controlled new-author discovery signal.
+- `difficulty`: fit with the reader's level and desired challenge.
+- `novelty`: whether the work adds a useful new perspective or area.
+
+These weights are starting hypotheses for the first baseline. They must be configurable, versioned, and evaluated. Do not present them as scientifically validated values.
+
+### 9.2 Feature normalization
+
+All component scores must be transformed to comparable ranges before combining them. Define how missing features are handled.
+
+For example:
+
+- Semantic similarity can be transformed from cosine similarity into a calibrated range.
+- Goal and topic relevance can use weighted overlap or a calibrated classifier.
+- Difficulty fit can use a simple rule-based score when difficulty metadata exists.
+- Author affinity can use explicit ratings and meaningful interactions.
+- Novelty can measure distance from the user's familiar topics while retaining a relevance threshold.
+
+Avoid assigning a zero to every missing feature without considering whether that unfairly penalizes incomplete catalogue records. Renormalize weights over available features or use a documented neutral value.
+
+### 9.3 Context-specific ranking
+
+Do not assume one weighting profile works for every task.
+
+| Request type | Ranking emphasis |
+|---|---|
+| Next read | Reader fit, current goal, difficulty, variety |
+| TBR priority | Goal relevance, reader fit, readiness, variety |
+| Discover | Semantic relevance, novelty, new-author/subject exploration |
+| Goal-based | Goal relevance, subject coverage, prerequisite order |
+| Mood-based | Request relevance, tone/experience signals where metadata supports them |
+| New author | Subject relevance, author novelty, reader fit |
+
+Store a ranking configuration version with each recommendation request.
+
+### 9.4 No LLM-based final ranking
+
+The LLM may translate a natural-language request into structured constraints, but the ranking service must validate those constraints and calculate the final order. The LLM must not be trusted to produce arbitrary scores or unsupported book metadata.
+
+## 10. Diversity and reranking
+
+A shortlist containing five nearly identical books is often less useful than a shortlist with several distinct but relevant options.
+
+After relevance scoring, apply a diversity-aware reranking step.
+
+### 10.1 Maximal Marginal Relevance (MMR)
+
+A possible baseline is:
+
+\[
+MMR(b) = \lambda \cdot Relevance(b) -
+(1-\lambda)\cdot
+\max_{s \in Selected} Similarity(b,s)
+\]
+
+- `Relevance(b)` is the candidate's relevance score.
+- `Similarity(b,s)` measures similarity to already selected works.
+- `λ` controls the relevance/diversity tradeoff.
+
+A higher \(\lambda\) favors relevance; a lower value favors diversity. Tune it through evaluation rather than assuming one universal value.
+
+### 10.2 Additional diversity constraints
+
+Consider soft constraints such as:
+
+- Limit repeated authors in a short list.
+- Avoid filling every slot with one genre.
+- Include adjacent subjects when relevant.
+- Balance familiar and exploratory choices.
+- Avoid near-duplicate editions or works.
+
+Do not force diversity when the user's request is narrow, such as “books specifically about database transaction management.”
+
+## 11. TBR prioritization
+
+TBR prioritization is a special ranking mode, not a generic recommendation request.
+
+The input set is the user's existing `want_to_read` works. The engine should order that set according to the user's current context.
+
+Potential signals:
+
+- Relevance to the reader's current goal.
+- Fit with current interests.
+- Difficulty and length fit.
+- Prerequisite readiness for a learning goal.
+- Variety across the resulting sequence.
+- User-stated urgency or intention, if provided.
+
+The engine should explain why a book is placed higher, for example:
+
+- “Strong match for your current economics learning goal.”
+- “A manageable starting point for this subject.”
+- “Complements another topic in your TBR list.”
+
+Do not claim that a book is objectively the best choice. The output is a context-aware suggested order, and the user remains in control.
+
+## 12. Goal-oriented reading journeys
+
+A reading journey turns a broad learning goal into stages and book suggestions.
+
+### 12.1 Goal interpretation
+
+The LLM can transform a natural-language goal into structured fields, such as:
+
+```json
+{
+  "goal": "Understand personal finance",
+  "reader_level": "beginner",
+  "topics": [
+    "money fundamentals",
+    "budgeting",
+    "saving",
+    "investing basics"
+  ],
+  "constraints": {
+    "language": "English",
+    "difficulty": "beginner"
+  }
+}
+```
+
+Validate the output against a schema and map topics to the controlled `subjects` catalogue. Reject or clarify unsupported topics instead of silently inventing subject IDs.
+
+### 12.2 Stage construction
+
+1. Resolve goal topics to catalogue subjects.
+2. Retrieve prerequisite relationships, where available.
+3. Build a directed acyclic graph (DAG) of subject dependencies.
+4. Topologically order subjects where dependencies are reliable.
+5. Retrieve and rank books for each stage.
+6. Ensure the journey progresses from foundational to more advanced material.
+7. Present the sequence as editable suggestions.
+
+A simple DAG algorithm or NetworkX is sufficient for the MVP. A graph database is not required.
+
+### 12.3 Uncertain prerequisites
+
+Prerequisite data may be incomplete or subjective. Mark inferred order as a suggestion, show uncertainty where appropriate, and allow users to reorder stages. Do not present a generated sequence as a formal curriculum unless it has been reviewed.
+
+## 13. Feedback and personalization loop
+
+The recommendation system should improve from user feedback without overreacting to isolated events.
+
+### 13.1 Feedback capture
+
+Capture explicit feedback where practical:
+
+- Helpful / not helpful.
+- Save to TBR.
+- Dismiss.
+- Rating after reading.
+- Optional reason for dismissal.
+
+Continue recording behavioral events such as views, clicks, starts, progress, and completions.
+
+### 13.2 Updating the reader profile
+
+For the MVP:
+
+1. Store every relevant interaction as an event.
+2. Apply documented signal weights.
+3. Recompute or incrementally update reader features.
+4. Keep explicit preferences separate from inferred preferences.
+5. Allow users to correct inferred interests.
+6. Version the profile-building logic.
+
+Do not immediately retrain a machine-learning model after every interaction. A deterministic profile update is easier to debug and evaluate at the beginning.
+
+### 13.3 Avoiding feedback loops
+
+- Do not let popularity dominate ranking.
+- Keep some exploration in suitable recommendation contexts.
+- Avoid treating a click as a strong positive preference.
+- Avoid treating abandonment as definitive dislike.
+- Monitor whether recommendations become increasingly narrow.
+- Give users controls to reset or edit preferences.
+
+## 14. Cold-start strategy
+
+### 14.1 New user
+
+When there is no interaction history:
+
+1. Use onboarding preferences and reading goals.
+2. Build an initial interest representation from selected subjects/genres or short preference descriptions.
+3. Retrieve candidates from semantic and metadata search.
+4. Apply difficulty, language, and other stated constraints.
+5. Use diversity-aware ranking.
+6. Ask for feedback after the user sees or reads recommendations.
+
+Do not require a long onboarding questionnaire. Collect a small number of high-value preferences and allow the profile to improve over time.
+
+### 14.2 New book
+
+For a newly added catalogue work:
+
+1. Validate and normalize metadata.
+2. Generate its embedding if sufficient descriptive text exists.
+3. Add its structured subject/genre relationships.
+4. Include it in retrieval once its required indexing steps succeed.
+
+If metadata is too sparse, keep it searchable by exact title/author where possible but avoid unsupported semantic claims.
+
+### 14.3 Sparse interaction history
+
+Blend explicit preferences with the few reliable interactions available. Increase reliance on behavior gradually as the signal count and quality improve.
+
+## 15. Explainability
+
+Each recommendation should have structured reasons generated from the ranking features and verified catalogue data.
+
+Example reason codes:
+
+- `MATCHES_CURRENT_GOAL`
+- `MATCHES_FAVORITE_SUBJECT`
+- `SIMILAR_TO_HIGHLY_RATED_BOOK`
+- `BEGINNER_FRIENDLY`
+- `INTRODUCES_NEW_AUTHOR`
+- `COMPLEMENTS_TBR`
+- `NEXT_STEP_IN_SUBJECT_JOURNEY`
+
+The LLM may turn these into natural language, but it must only use supplied reason codes and metadata. It must not invent claims such as “this is the most influential book in the field” without a trusted source.
+
+Keep the explanation separate from the numeric ranking calculation so generated prose cannot alter the result.
+
+## 16. Evaluation strategy
+
+Recommendation quality must be measured. A plausible-looking list is not sufficient evidence that the system works.
+
+### 16.1 Offline evaluation
+
+Create a reproducible evaluation dataset from held-out user interactions when enough data exists. Use a temporal split so future interactions do not leak into the training/profile-building period.
+
+| Metric | What it measures |
+|---|---|
+| Precision@K | Fraction of top-K recommendations that are relevant |
+| Recall@K | Fraction of relevant items retrieved in top K |
+| NDCG@K | Ranking quality with greater weight on relevant items near the top |
+| MAP@K | Average precision across users or queries |
+| Catalog coverage | How much of the eligible catalogue can be recommended |
+| Intra-list diversity | How different the books in one recommendation list are |
+| Novelty | Whether recommendations go beyond highly familiar/popular items |
+| Popularity concentration | Whether results are dominated by a small set of popular works |
+
+These metrics require a defensible relevance signal. Ratings, saves, and other events are imperfect proxies; document the chosen relevance definition.
+
+### 16.2 Baselines and ablation
+
+Compare the hybrid engine against simple baselines:
+
+1. Popularity or curated baseline.
+2. Metadata-only matching.
+3. Semantic similarity only.
+4. Hybrid ranking without diversity.
+5. Full hybrid ranking with diversity.
+
+Run ablation tests by removing one feature at a time to understand whether it improves results.
+
+### 16.3 Online and beta evaluation
+
+For the initial 20–30 beta users, collect:
+
+- Recommendation helpfulness feedback.
+- Save-to-TBR rate.
+- Recommendation dismissal rate.
+- Whether users start recommended books.
+- Whether users return to request more recommendations.
+- TBR prioritization usefulness.
+- Journey clarity and completion feedback.
+
+With a small beta, treat results as qualitative and directional rather than statistically conclusive. Interview users about why they accepted or rejected recommendations.
+
+## 17. End-to-end recommendation flow
+
+```mermaid
+flowchart TD
+    A[User request] --> B[Identify request type and context]
+    B --> C[Load profile, preferences and activity]
+    C --> D[Interpret request into validated filters and goal]
+    D --> E[Generate candidates]
+    E --> E1[Semantic retrieval]
+    E --> E2[Metadata retrieval]
+    E --> E3[Full-text and trigram retrieval]
+    E1 --> F[Merge and deduplicate candidates]
+    E2 --> F
+    E3 --> F
+    F --> G[Apply eligibility filters]
+    G --> H[Calculate feature scores]
+    H --> I[Hybrid ranking]
+    I --> J[Diversity-aware reranking]
+    J --> K[Create reason codes]
+    K --> L[Persist request and ranked items]
+    L --> M[Return recommendations]
+    M --> N[Capture feedback and interactions]
+    N --> C
+```
+
+### 17.1 High-level pseudocode
+
+```python
+def recommend(user_id, request):
+    profile = load_reader_profile(user_id)
+    context = validate_request_context(request, profile)
+
+    candidates = union_candidates(
+        semantic_candidates(profile, context),
+        metadata_candidates(profile, context),
+        text_candidates(context),
+        exploration_candidates(profile, context),
+    )
+
+    candidates = deduplicate_by_work_id(candidates)
+    eligible = apply_request_specific_filters(
+        user_id=user_id,
+        candidates=candidates,
+        context=context,
+    )
+
+    scored = [
+        score_candidate(profile, book, context)
+        for book in eligible
+    ]
+
+    ranked = sort_by_score(scored)
+    diversified = diversify(ranked, context)
+    explained = attach_grounded_reason_codes(diversified)
+
+    return persist_and_return(
+        user_id=user_id,
+        context=context,
+        recommendations=explained,
+    )
+```
+
+This is illustrative pseudocode. The production implementation should use typed service interfaces, explicit error handling, bounded candidate counts, and query timeouts.
+
+## 18. Suggested service boundaries
+
+Keep the engine modular within the FastAPI backend.
+
+| Component | Responsibility |
+|---|---|
+| `ReaderProfileService` | Build and retrieve explicit/inferred reader features |
+| `BookRepresentationService` | Construct versioned text documents and embeddings |
+| `CandidateRetrievalService` | Semantic, metadata, and text retrieval |
+| `EligibilityFilterService` | Apply request-specific exclusions and constraints |
+| `RecommendationScoringService` | Calculate normalized feature scores |
+| `DiversificationService` | Apply MMR and list-level constraints |
+| `TBRPrioritizationService` | Rank only the user's TBR set |
+| `ReadingJourneyService` | Map goals to subjects, stages, and books |
+| `ExplanationService` | Convert reason codes into user-facing explanations |
+| `RecommendationEvaluationService` | Compute offline metrics and evaluation reports |
+
+These are logical modules, not separate deployable microservices.
+
+## 19. API-level behavior
+
+The detailed endpoint contract belongs in `API_SPECIFICATION.md`. At a high level, the engine should support operations equivalent to:
+
+- Generate recommendations for a request type and context.
+- Prioritize the user's TBR list.
+- Generate or update a reading journey.
+- Submit feedback on a recommendation.
+- Retrieve a previous recommendation result.
+
+Each recommendation response should expose stable work identifiers, rank, grounded reasons, and optional score details. Do not expose private internal profile data unnecessarily.
+
+## 20. Testing strategy
+
+Test the recommendation engine at multiple levels.
+
+### Unit tests
+
+- Score normalization and weighted scoring.
+- Missing-feature handling.
+- Interaction-weight mapping.
+- Reader-vector construction.
+- Eligibility rules by request type.
+- MMR/diversity behavior.
+- Goal-to-subject validation.
+- Prerequisite graph cycle detection.
+- Reason-code generation.
+
+### Integration tests
+
+- pgvector candidate retrieval.
+- Full-text and trigram search.
+- Candidate union and work-level deduplication.
+- Recommendation persistence.
+- TBR-only ranking.
+- Recommendation feedback updates.
+
+### Quality and regression tests
+
+- A known query should retrieve expected relevant catalogue examples.
+- A TBR request must never introduce a book outside the user's TBR.
+- A completed book should be excluded from a normal next-read request unless rereads are enabled.
+- A narrow query should not be diversified with irrelevant books.
+- Missing metadata should not cause crashes or fabricated explanations.
+- Ranking changes should be compared against a fixed evaluation set.
+
+## 21. Phased implementation plan
+
+### Phase 1 — Deterministic baseline
+
+- Build catalogue feature extraction.
+- Implement explicit reader preferences.
+- Implement metadata and text candidate retrieval.
+- Implement configurable hybrid scoring.
+- Add eligibility filters and reason codes.
+- Persist recommendation requests and results.
+
+### Phase 2 — Semantic recommendations
+
+- Benchmark and pin a 384-dimensional embedding model.
+- Generate work embeddings.
+- Add pgvector retrieval.
+- Combine semantic and metadata candidates.
+- Evaluate semantic-only versus hybrid ranking.
+
+### Phase 3 — Personalization and diversity
+
+- Capture interactions and explicit feedback.
+- Build reader interest vectors.
+- Add context-specific ranking configurations.
+- Add MMR and exploration controls.
+- Evaluate cold-start and repeat-user behavior.
+
+### Phase 4 — TBR and reading journeys
+
+- Implement TBR-only prioritization.
+- Map goals to controlled subjects.
+- Add prerequisite-aware stage ordering.
+- Generate editable journey suggestions.
+- Test journey usefulness with beta users.
+
+### Phase 5 — Evaluation and refinement
+
+- Build offline evaluation datasets.
+- Run baseline and ablation comparisons.
+- Analyze beta feedback.
+- Tune weights and thresholds.
+- Monitor catalogue coverage, diversity, latency, and recommendation quality.
+
+## 22. Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Sparse or inaccurate book metadata | Track metadata quality; avoid unsupported claims |
+| Cold-start users | Use onboarding preferences and goal context |
+| Embeddings miss exact names or titles | Combine semantic retrieval with full-text and trigram search |
+| Recommendations become repetitive | Apply diversity-aware reranking and exploration |
+| Popularity bias | Monitor popularity concentration and include relevant long-tail works |
+| Weak feedback is overinterpreted | Use conservative interaction weights and editable preferences |
+| LLM invents books or reasons | Retrieve from the catalogue; constrain explanations to stored evidence |
+| Incorrect prerequisite ordering | Validate DAGs and label uncertain sequencing as suggestions |
+| Small beta gives noisy metrics | Combine quantitative signals with interviews and qualitative feedback |
+
+## 23. Implementation parameters to validate
+
+The architectural choices above are finalized. The following parameters remain deliberately configurable and must be validated during implementation:
+
+1. Initial scoring weights and their normalization rules.
+2. Candidate-pool size and retrieval limits.
+3. MMR relevance/diversity parameter and author/genre caps.
+4. Interaction signal weights and how they decay over time.
+5. Exact embedding model revision after benchmark.
+6. Which metadata fields are reliable enough for difficulty, mood, and novelty features.
+7. Which evaluation relevance labels are available during the first beta.
+8. Whether reader profiles are recomputed on every request or updated asynchronously.
+
+## 24. Review completion checklist
+
+- [x] Initial ranking: hybrid weighted scoring baseline
+- [x] Diversity: MMR with soft author/genre limits
+- [x] Reader profile: explicit preferences + behavioral signals + embeddings
+- [x] Reading journey sequencing: subject prerequisite DAG + topological ordering
+- [x] Feedback updates: incremental/deterministic profile updates
+- [ ] Benchmark and pin the embedding model revision
+- [ ] Evaluate and tune scoring weights and normalization
+- [ ] Tune MMR parameters and diversity constraints
+- [ ] Validate interaction weights with beta feedback
+- [ ] Validate prerequisite subject data and cycle checks
+
+## 25. Final design principles
+
+- Retrieval, filtering, scoring, and ranking must be deterministic and testable.
+- The LLM supports natural-language interaction and grounded explanations; it does not replace the ranking algorithm.
+- Explicit user preferences take precedence over weak inferred signals.
+- Relevance comes before diversity; diversity should not make a list irrelevant.
+- TBR prioritization must rank the user's existing list rather than silently add books.
+- Recommendations must be explainable using traceable features and catalogue evidence.
+- Algorithm weights and versions must be recorded so results can be evaluated and reproduced.
+- Start with a simple, measurable baseline and add complexity only when data demonstrates a need.
+
+---
+
+**Document owner:** The Reading Compass project  
+**Related documents:** `PRD.md`, `SYSTEM_ARCHITECTURE.md`, `DATABASE_SCHEMA.md`, `API_SPECIFICATION.md`  
