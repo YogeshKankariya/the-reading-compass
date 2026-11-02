@@ -1,4 +1,4 @@
-# Database Schema — The Reading Compass
+~# Database Schema — The Reading Compass
 
 **Document version:** 1.1  
 **Status:** Finalized for MVP architecture; implementation details remain subject to migration review  
