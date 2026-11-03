@@ -25,6 +25,12 @@ from backend.db.base import Base
 if TYPE_CHECKING:
     from backend.db.models.author import Author, BookWorkAuthor
     from backend.db.models.genre import BookWorkGenre, Genre
+    from backend.db.models.interaction import UserInteraction
+    from backend.db.models.library import (
+        BookRating,
+        ReadingListBook,
+        UserBook,
+    )
     from backend.db.models.subject import BookWorkSubject, Subject
 
 
@@ -131,6 +137,30 @@ class BookWork(Base):
         secondary="book_work_subjects",
         back_populates="works",
         viewonly=True,
+    )
+    user_books: Mapped[list[UserBook]] = relationship(
+        "UserBook",
+        back_populates="work",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    ratings: Mapped[list[BookRating]] = relationship(
+        "BookRating",
+        back_populates="work",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    reading_list_items: Mapped[list[ReadingListBook]] = relationship(
+        "ReadingListBook",
+        back_populates="work",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    interactions: Mapped[list[UserInteraction]] = relationship(
+        "UserInteraction",
+        back_populates="work",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:

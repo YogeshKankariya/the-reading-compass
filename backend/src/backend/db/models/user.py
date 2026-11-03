@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
@@ -19,6 +20,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.db.base import Base
+
+if TYPE_CHECKING:
+    from backend.db.models.interaction import UserInteraction
+    from backend.db.models.library import BookRating, ReadingList, UserBook
 
 
 class User(Base):
@@ -84,6 +89,30 @@ class User(Base):
     )
     preferences: Mapped[list[UserPreference]] = relationship(
         "UserPreference",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    user_books: Mapped[list[UserBook]] = relationship(
+        "UserBook",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    ratings: Mapped[list[BookRating]] = relationship(
+        "BookRating",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    reading_lists: Mapped[list[ReadingList]] = relationship(
+        "ReadingList",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    interactions: Mapped[list[UserInteraction]] = relationship(
+        "UserInteraction",
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
