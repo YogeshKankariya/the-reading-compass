@@ -3,6 +3,12 @@ from backend.db.models.author import Author, BookWorkAuthor
 from backend.db.models.book import BookEdition, BookWork
 from backend.db.models.genre import BookWorkGenre, Genre
 from backend.db.models.subject import BookWorkSubject, Subject
+from backend.db.models.user import (
+    User,
+    UserAuthIdentity,
+    UserPreference,
+    UserProfile,
+)
 
 __all__ = [
     "Base",
@@ -14,4 +20,8 @@ __all__ = [
     "BookWorkGenre",
     "Subject",
     "BookWorkSubject",
+    "User",
+    "UserAuthIdentity",
+    "UserProfile",
+    "UserPreference",
 ]
