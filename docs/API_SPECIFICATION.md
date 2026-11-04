@@ -659,18 +659,35 @@ Request:
 {
   "work_id": "work-uuid",
   "feedback": "helpful",
-  "reason": null
+  "reason": "Clear explanation and matched my reading level."
 }
 ```
 
-Supported feedback values may include:
+Request fields:
+- `work_id`: UUID (required) — Identifies the recommended book work.
+- `feedback`: string (required) — Selected feedback action (`"helpful" | "not_helpful" | "save" | "dismiss"`).
+- `reason`: string or null (optional) — User-supplied explanation or context; may be omitted or null.
+
+Supported feedback values:
 
 - `helpful`
 - `not_helpful`
 - `save`
 - `dismiss`
 
-Validate that the work was actually included in the specified recommendation request.
+Validation and persistence behavior:
+1. Validates that the work was included in the specified recommendation request (`recommendation_items`).
+2. Updates the latest feedback state directly on `recommendation_items`:
+   - `feedback_type`: `"helpful" | "not_helpful" | "save" | "dismiss"`
+   - `feedback_reason`: optional user explanation (stored as null if omitted)
+   - `feedback_at`: submission timestamp in UTC
+3. Emits a corresponding immutable event into `user_interactions` (preserving the complete append-only event stream):
+   - `"helpful"` &rarr; `interaction_type = "recommendation_helpful"`
+   - `"not_helpful"` &rarr; `interaction_type = "recommendation_not_helpful"`
+   - `"save"` &rarr; `interaction_type = "save"`
+   - `"dismiss"` &rarr; `interaction_type = "dismiss"`
+   - `context`: `{ "recommendation_request_id": "...", "reason": "..." }`
+This dual architecture provides fast, direct access to the latest feedback status on `recommendation_items` for quality metrics and evaluations while preserving an append-only event stream in `user_interactions` to drive dynamic profile evolution.
 
 ### 12.2 Record an interaction
 

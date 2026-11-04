@@ -26,8 +26,8 @@ The following decisions were confirmed during schema review.
 
 | Decision | Selected approach | Schema implication |
 |---|---|---|
-| Rating scale | 1–5 stars | Store ratings as numeric values from 1.0 to 5.0 |
-| Reading progress | Pages and percentage | Store `current_page`, `total_pages`, and `progress_percent` |
+| Rating scale | 1–5 stars | Store ratings as integer values from 1 to 5 |
+| Reading progress | Pages and percentage | Store `current_page`, `total_pages`, and `progress_percent` in dedicated progress tracker |
 | Embedding dimension | 384 | Use `VECTOR(384)` for book embeddings |
 | Authentication | Email/password + Google OAuth | Support multiple authentication identities per user |
 | Book identity | Work-level | Personal library entries reference a book work; edition is optional |
@@ -58,9 +58,14 @@ The principal relationships are:
 - A user can have multiple `user_auth_identities` (for example, Google OAuth and password-based login).
 - A `book_work` can have multiple `book_editions`.
 - A work can have multiple authors, genres, and subjects through join tables.
-- A user can have many `user_books` entries, each connecting the user to a work.
+- A user can have many `user_books` entries, each tracking the user's shelf status for a work.
+- A `user_books` row can have at most one `reading_progress` record tracking current progress.
+- A user can record explicit `book_ratings` for works.
+- A user can create multiple `reading_lists`, each containing ordered `reading_list_books`.
+- A user performs append-only `user_interactions` informing recommendations.
 - A user can generate many `recommendation_requests`; each request can return multiple `recommendation_items`.
 - A user can create multiple `reading_journeys`; each journey contains ordered stages and selected books.
+- A user can set optional `reading_goals` that may guide journeys or recommendation requests.
 - A work can have one or more versioned embeddings.
 
 ```mermaid
@@ -77,8 +82,18 @@ erDiagram
     SUBJECTS ||--o{ BOOK_WORK_SUBJECTS : includes
     USERS ||--o{ USER_BOOKS : tracks
     BOOK_WORKS ||--o{ USER_BOOKS : appears_in
+    BOOK_EDITIONS ||--o{ USER_BOOKS : format_context
+    USER_BOOKS ||--o| READING_PROGRESS : has
+    USERS ||--o{ BOOK_RATINGS : rates
+    BOOK_WORKS ||--o{ BOOK_RATINGS : rated_in
+    USERS ||--o{ READING_LISTS : creates
+    READING_LISTS ||--o{ READING_LIST_BOOKS : contains
+    BOOK_WORKS ||--o{ READING_LIST_BOOKS : listed_in
     USERS ||--o{ USER_INTERACTIONS : performs
     BOOK_WORKS ||--o{ USER_INTERACTIONS : receives
+    USERS ||--o| USER_INTEREST_PROFILES : maintains
+    USERS ||--o{ READING_GOALS : defines
+    READING_GOALS o|--o{ READING_JOURNEYS : informs
     USERS ||--o{ RECOMMENDATION_REQUESTS : requests
     RECOMMENDATION_REQUESTS ||--o{ RECOMMENDATION_ITEMS : returns
     BOOK_WORKS ||--o{ RECOMMENDATION_ITEMS : recommended
@@ -318,192 +333,397 @@ For the MVP, a simpler provider-sync log may be enough. Avoid building a complex
 
 ### 8.1 `user_books`
 
-Connects a user to a work and stores their personal reading state.
+Represents a user's canonical library record and bookshelf membership for a canonical book work.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `user_id` | UUID | FK → `users.id` |
-| `work_id` | UUID | FK → `book_works.id` |
-| `edition_id` | UUID, nullable | Optional FK → `book_editions.id` |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `work_id` | UUID | FK → `book_works.id` (ON DELETE CASCADE) |
+| `edition_id` | UUID, nullable | Optional FK → `book_editions.id` (ON DELETE SET NULL) |
 | `status` | VARCHAR(20) | `want_to_read`, `currently_reading`, `completed`, `paused`, `abandoned` |
-| `rating` | NUMERIC(2,1), nullable | 1.0–5.0 |
-| `current_page` | INTEGER, nullable | Current page reached |
-| `total_pages` | INTEGER, nullable | Page count for selected edition |
-| `progress_percent` | NUMERIC(5,2) | 0–100 |
-| `started_at` | DATE, nullable | Reading start date |
-| `completed_at` | DATE, nullable | Completion date |
-| `notes` | TEXT, nullable | Private user notes |
+| `notes` | TEXT, nullable | Private user notes for this library item |
 | `created_at` | TIMESTAMPTZ | Creation time |
 | `updated_at` | TIMESTAMPTZ | Last update |
 
 Constraints and behavior:
 
-- Unique (`user_id`, `work_id`) for one personal entry per work.
-- `rating` must be null or between 1.0 and 5.0.
-- `current_page` and `total_pages` must be non-negative when present.
-- `current_page` must not exceed `total_pages` when both are present.
-- `progress_percent` must be between 0 and 100.
-- Calculate or validate percentage from pages in backend logic when page counts are available.
-- When page counts are unavailable, allow percentage-based progress.
-- Decide whether ratings permit whole stars, half stars, or one-decimal values in the product UI; the schema supports one decimal place.
+- Unique (`user_id`, `work_id`) for one personal library entry per work.
+- Status check constraint: `status IN ('want_to_read', 'currently_reading', 'completed', 'paused', 'abandoned')`.
+- Index `(user_id, status)` for fast filtering of library shelves.
+- Index `(work_id)` for reverse lookup.
+- Index `(edition_id)` for foreign key joins.
+- Edition-work consistency: `edition_id` must belong to `work_id`. Enforced through service validation; can be reinforced with a composite foreign key if a unique constraint `(id, work_id)` is added to `book_editions` in a future catalogue migration.
+- Deleting a `user_books` record cascades to its `reading_progress`, but preserves `book_ratings` and `reading_list_books`.
 
-The selected work-level identity avoids duplicate personal-library entries for different editions of the same book. The optional edition link preserves pagination and format context.
+### 8.2 `reading_progress`
 
-### 8.2 `user_interactions`
-
-Records user actions that can inform personalization and analytics.
+Tracks the optional current reading progress state for an entry in `user_books`.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `user_id` | UUID | FK → `users.id` |
-| `work_id` | UUID, nullable | FK → `book_works.id` |
-| `interaction_type` | VARCHAR(40) | For example: `view`, `click`, `save`, `dismiss`, `rate`, `start`, `complete`, `abandon` |
-| `rating_value` | NUMERIC(2,1), nullable | Relevant for rating events |
-| `context` | JSONB | Optional source/context, such as recommendation request |
+| `user_book_id` | UUID | Unique FK → `user_books.id` (ON DELETE CASCADE) |
+| `current_page` | INTEGER, nullable | Current page reached (`CHECK >= 0`) |
+| `total_pages` | INTEGER, nullable | Total page count (`CHECK > 0`) |
+| `progress_percent` | NUMERIC(5,2) | Progress percentage 0–100 (`CHECK 0.00 <= p <= 100.00`) |
+| `started_at` | DATE, nullable | Reading start date |
+| `completed_at` | DATE, nullable | Completion date |
+| `last_read_at` | TIMESTAMPTZ, nullable | Timestamp of latest progress update |
+| `created_at` | TIMESTAMPTZ | Creation time |
+| `updated_at` | TIMESTAMPTZ | Last update |
+
+Constraints and behavior:
+
+- At most one `reading_progress` row per `user_books` entry guaranteed by unique constraint (`UNIQUE (user_book_id)`). Progress tracking is initialized upon reading initiation; entries in `user_books` without progress records are permitted. Redundant secondary index on `user_book_id` is omitted.
+- Page check constraints:
+  - `CHECK (current_page IS NULL OR current_page >= 0)`
+  - `CHECK (total_pages IS NULL OR total_pages > 0)`
+  - `CHECK (current_page IS NULL OR total_pages IS NULL OR current_page <= total_pages)`
+- Shelf status synchronization (transactional service-layer rules):
+  - Starting: transitioning a book to active reading sets `user_books.status = 'currently_reading'` and initializes `reading_progress.started_at` to the current date if not already set.
+  - Completing: marking a book as finished sets `user_books.status = 'completed'`, `reading_progress.progress_percent = 100.00`, `reading_progress.completed_at = current_date`, and if `total_pages` is known, sets `reading_progress.current_page = reading_progress.total_pages`.
+  - Both updates are executed within a single database transaction.
+- Progress consistency rules:
+  - When both `current_page` and `total_pages` are provided, the backend calculates/validates `progress_percent = round((current_page::numeric / total_pages::numeric) * 100.0, 2)`.
+  - When page numbers are unavailable (e.g. audiobooks, web articles), percentage-only progress is permitted.
+  - Page bounds (`current_page <= total_pages`) and percentage bounds (`0.00 <= progress_percent <= 100.00`) are strictly enforced.
+
+### 8.3 `book_ratings`
+
+Stores explicit ratings and optional reviews, decoupled from library membership.
+
+| Column | Type | Rules / purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `work_id` | UUID | FK → `book_works.id` (ON DELETE CASCADE) |
+| `rating` | SMALLINT | Integer rating 1–5 (`CHECK (rating >= 1 AND rating <= 5)`) |
+| `review_text` | TEXT, nullable | Optional user review |
+| `is_spoiler` | BOOLEAN | Default false |
+| `created_at` | TIMESTAMPTZ | Rating timestamp |
+| `updated_at` | TIMESTAMPTZ | Review update timestamp |
+
+Constraints and behavior:
+
+- Unique (`user_id`, `work_id`): exactly one rating per user per book work.
+- Rating check constraint: `rating >= 1 AND rating <= 5` (integer stars).
+- Index `(work_id, rating)` for computing average book ratings and distribution metrics.
+- Index `(user_id, rating)` for recommendation preference profiling.
+- Transactional telemetry: Rating creation, modification, or removal must emit a corresponding `UserInteraction(type='rate')` event within the exact same database transaction.
+- Independence: A user can rate a work without having it in their active library shelves; deleting a `user_books` shelf entry does not delete the user's rating.
+
+### 8.4 `reading_lists`
+
+Allows users to create custom and curated book collections (e.g. "Favorites", "2026 TBR", "Deep Work").
+
+| Column | Type | Rules / purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `name` | VARCHAR(120) | User-facing list name |
+| `description` | TEXT, nullable | Optional list summary |
+| `is_public` | BOOLEAN | Default false (private by default) |
+| `created_at` | TIMESTAMPTZ | Creation time |
+| `updated_at` | TIMESTAMPTZ | Last update |
+
+Constraints and behavior:
+
+- Case-insensitive unique list name per user via unique functional index: `CREATE UNIQUE INDEX uq_reading_lists_user_lower_name ON reading_lists (user_id, lower(name))`.
+- Index `(user_id, created_at DESC)` for retrieving a user's lists.
+
+### 8.5 `reading_list_books`
+
+Ordered join table linking reading lists directly to canonical `book_works`.
+
+| Column | Type | Rules / purpose |
+|---|---|---|
+| `list_id` | UUID | FK → `reading_lists.id` (ON DELETE CASCADE), PK 1 |
+| `work_id` | UUID | FK → `book_works.id` (ON DELETE CASCADE), PK 2 |
+| `position` | INTEGER | 1-based order within list (`CHECK (position >= 1)`) |
+| `notes` | TEXT, nullable | Optional note specific to list inclusion |
+| `added_at` | TIMESTAMPTZ | Addition timestamp |
+
+Constraints and behavior:
+
+- Composite primary key: (`list_id`, `work_id`). Guarantees a book cannot appear twice in the same list.
+- Order constraint: `UNIQUE (list_id, position)` ensures unambiguous ordering without duplicate positions. Redundant secondary index on `(list_id, position)` is omitted.
+- Index `(work_id)` for finding all lists that include a given work.
+- Transactional reordering: Reordering list items must occur within a single database transaction using temporary positions above the current maximum (or temporary offsets) to avoid intermediate `UNIQUE (list_id, position)` constraint collisions while preserving continuous 1-based ordering.
+- Reference target: References `book_works` directly rather than `user_books`, allowing users to curate lists of books without forcibly placing them onto their personal active bookshelf.
+
+### 8.6 `user_interactions`
+
+Append-only event log recording user actions for recommendation scoring and behavioral analytics.
+
+| Column | Type | Rules / purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `work_id` | UUID, nullable | FK → `book_works.id` (ON DELETE CASCADE) |
+| `interaction_type` | VARCHAR(40) | Supported interaction event type |
+| `rating_value` | SMALLINT, nullable | 1–5 integer rating when event is a rating |
+| `context` | JSONB, nullable | Optional client context (recommendation_request_id, search_query, etc.) |
 | `created_at` | TIMESTAMPTZ | Event time |
 
-Store events rather than overwriting the history of user behavior. Do not interpret every event as a definitive preference: for example, abandoning a book may reflect timing rather than dislike.
+Constraints and behavior:
 
-### 8.3 `reading_goals`
+- Check constraint on supported types:
+  ```sql
+  CHECK (interaction_type IN (
+      'view',
+      'click',
+      'save',
+      'dismiss',
+      'rate',
+      'start',
+      'progress',
+      'complete',
+      'abandon',
+      'recommendation_click',
+      'recommendation_helpful',
+      'recommendation_not_helpful'
+  ))
+  ```
+- Check constraint on rating: `CHECK (rating_value IS NULL OR (rating_value >= 1 AND rating_value <= 5))`.
+- Append-only event history: Never update or delete interaction logs during normal application operations. Account deletion and catalogue work deletion cascade-delete related interaction events. Rating deletion generates a `rate` event with `rating_value = NULL` and a deletion indicator in `context` (e.g. `{"action": "delete"}`). Current operational state lives in `reading_progress`, `book_ratings`, `user_books`, and `recommendation_items`.
+- Recommendation feedback tracking: Recommendation item feedback (`helpful`, `not_helpful`, `save`, `dismiss`) stores its latest status directly on `recommendation_items` and simultaneously logs an append-only event (`recommendation_helpful`, `recommendation_not_helpful`, `save`, `dismiss`) in `user_interactions` to preserve full event history for profile evolution and evaluation metrics.
+- Index `(user_id, created_at DESC)` for user event streams.
+- Index `(user_id, interaction_type, created_at DESC)` for filtered activity feeds.
+- Index `(work_id, interaction_type)` for calculating book popularity and interaction metrics.
 
-Optional table for explicit user goals.
+### 8.7 `reading_goals` (Milestone 4A)
 
-Suggested columns:
+Stores explicit user reading and learning goals.
 
-- `id` UUID primary key
-- `user_id` UUID FK
-- `title` VARCHAR(160)
-- `description` TEXT, nullable
-- `goal_type` VARCHAR(40), such as `learn_subject`, `read_more`, `explore_genre`
-- `target_date` DATE nullable
-- `status` VARCHAR(20)
-- `created_at` and `updated_at` TIMESTAMPTZ
+| Column | Type | Rules / purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `title` | VARCHAR(160) | Goal title |
+| `description` | TEXT, nullable | Goal objective |
+| `goal_type` | VARCHAR(40) | Supported goal categories (`learn_subject`, `read_more`, `explore_genre`, `career_development`, `skill_depth`, `custom`) |
+| `target_date` | DATE, nullable | Target completion date |
+| `status` | VARCHAR(20) | Goal status (`active`, `completed`, `paused`, `abandoned`), default `'active'` |
+| `created_at` | TIMESTAMPTZ | Creation time |
+| `updated_at` | TIMESTAMPTZ | Last update |
 
-A goal may be used to generate a reading journey or a context-specific recommendation request.
+Constraints and behavior:
 
-## 9. Recommendation records
+- Goal type constraint: `CHECK (goal_type IN ('learn_subject', 'read_more', 'explore_genre', 'career_development', 'skill_depth', 'custom'))`. Reconciled with PRD requirements across structured learning, reading habits, breadth exploration, professional development, and personal objectives.
+- Status constraint: `CHECK (status IN ('active', 'completed', 'paused', 'abandoned'))`.
+- Cross-user boundary protection: `UNIQUE (id, user_id)` (`uq_reading_goals_id_user`). This composite unique constraint enables future reading journeys to enforce `FOREIGN KEY (goal_id, user_id) REFERENCES reading_goals (id, user_id)` at the database level, guaranteeing that journey goal assignments cannot cross user boundaries.
+- Index `(user_id, status)` for fast user goal filtering.
+
+### 8.8 Deferred reading features
+
+The following features are explicitly deferred beyond the initial MVP:
+
+- `ReadingSession` history: Session-level interval logs (e.g., date, reading duration in minutes, pages read per individual session, reading speed velocity). Current progress remains a single 1-to-1 state in `reading_progress`.
+- Social reading lists: Collaborative multi-user editing, public list followers, and list comments.
+- Social reviews: Comments, upvotes, review threads, and public spoiler moderation.
+
+## 9. Recommendation records (Milestone 4A)
 
 ### 9.1 `recommendation_requests`
 
-Stores the context and configuration for a recommendation run.
+Stores the context, filters, and configuration for a recommendation run.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `user_id` | UUID | FK → `users.id` |
-| `request_type` | VARCHAR(40) | `next_read`, `discover`, `tbr_priority`, `goal_based`, etc. |
-| `request_context` | JSONB | User prompt, goal, filters, or context |
-| `algorithm_version` | VARCHAR(40) | Version of ranking configuration |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `request_type` | VARCHAR(40) | Recommendation intent category |
+| `request_context` | JSONB, nullable | User prompt, mood, goal_id, and filter constraints |
+| `algorithm_version` | VARCHAR(40) | Version of ranking configuration (e.g. `'hybrid-v1.0'`) |
 | `created_at` | TIMESTAMPTZ | Request time |
+
+Constraints and behavior:
+
+- Request type check: `CHECK (request_type IN ('next_read', 'discover', 'tbr_priority', 'goal_based', 'mood_based', 'new_author'))`.
+- Foreign key: `user_id` cascades on user account deletion (`ON DELETE CASCADE`).
+- Index `(user_id, created_at DESC)` for retrieving past recommendation runs.
+- Auditability: Preserves the exact algorithm version and query context for reproducible evaluation and regression testing.
 
 ### 9.2 `recommendation_items`
 
-Stores the ordered results for a request.
+Stores the ordered, diversified recommendations returned for a request, including scores, component breakdowns, explanation reason codes, and user feedback.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `request_id` | UUID | FK → `recommendation_requests.id` |
-| `work_id` | UUID | FK → `book_works.id` |
-| `rank_position` | INTEGER | 1-based rank |
-| `score` | NUMERIC(8,6) | Final ranking score |
-| `score_breakdown` | JSONB | Component scores and weights |
-| `reason_codes` | JSONB | Structured explanation reasons |
+| `request_id` | UUID | FK → `recommendation_requests.id` (ON DELETE CASCADE) |
+| `work_id` | UUID | FK → `book_works.id` (ON DELETE CASCADE) |
+| `rank_position` | INTEGER | 1-based display rank (`CHECK (rank_position >= 1)`) |
+| `score` | NUMERIC(8,6) | Final normalized ranking score (`CHECK (score >= 0.000000 AND score <= 1.000000)`) |
+| `score_breakdown` | JSONB, nullable | Component scores used in the scoring formula |
+| `reason_codes` | JSONB, nullable | Structured explanation reasons from controlled registry |
+| `feedback_type` | VARCHAR(30), nullable | Latest user feedback (`helpful`, `not_helpful`, `save`, `dismiss`) |
+| `feedback_reason` | TEXT, nullable | Optional user-supplied explanation for feedback |
+| `feedback_at` | TIMESTAMPTZ, nullable | Timestamp feedback was submitted |
 | `created_at` | TIMESTAMPTZ | Creation time |
 
-Constraints:
+Constraints and behavior:
 
-- Unique (`request_id`, `work_id`).
-- Unique (`request_id`, `rank_position`).
-- Keep score components and algorithm version so results can be audited and compared.
-- Explanations shown to users should be grounded in these reason codes and catalogue metadata.
+- Uniqueness:
+  - `UNIQUE (request_id, work_id)` prevents the same work appearing twice in a recommendation run.
+  - `UNIQUE (request_id, rank_position)` ensures unambiguous ordering.
+- Score normalization: `score` is a deterministic normalized ranking value strictly in the range `0 <= score <= 1` (stored as `NUMERIC(8,6)`). It represents relative rank ordering within candidate pools, not a probability or an objective book-quality measurement.
+- Score breakdown schema: Structured JSON mapping component features:
+  ```json
+  {
+    "semantic": 0.91,
+    "goal": 0.88,
+    "topic": 0.84,
+    "author": 0.70,
+    "difficulty": 0.95,
+    "novelty": 0.82
+  }
+  ```
+- Reason codes schema & registry: JSON array of strings drawn strictly from the controlled reason registry:
+  - `MATCHES_CURRENT_GOAL`: Direct match with user's active reading goal.
+  - `MATCHES_FAVORITE_SUBJECT`: Aligns with explicit reader subject preferences.
+  - `SIMILAR_TO_HIGHLY_RATED_BOOK`: High semantic similarity to a book rated 4 or 5 by the user.
+  - `BEGINNER_FRIENDLY`: Fits reader's introductory proficiency level.
+  - `INTRODUCES_NEW_AUTHOR`: Controlled discovery signal for unread author.
+  - `COMPLEMENTS_TBR`: High thematic synergy with books on user's TBR list.
+  - `TOPIC_RELEVANCE`: Strong keyword/subject match with prompt.
+  - `HIGH_BOOK_RATING`: Positive general reader response.
+  - `POPULAR_IN_GENRE`: Well-received exemplar within candidate genre.
+  - `NEXT_STEP_IN_SUBJECT_JOURNEY`: Logical subsequent milestone in a structured reading sequence (supported future reason code; deferred to Milestone 4B with Learning Journeys).
+  *LLM Grounding:* Natural language explanations generated by the assistant must be grounded in these stored reason codes and verified catalogue metadata; the LLM must never invent unsupported claims.
+- Feedback check: `CHECK (feedback_type IS NULL OR feedback_type IN ('helpful', 'not_helpful', 'save', 'dismiss'))`.
+- Index `(work_id)` for reverse lookups and tracking recommendation frequency.
 
-## 10. Reading journeys
+## 10. Reading journeys (Deferred to Milestone 4B)
+
+> [!NOTE]
+> Reading journeys are architecturally specified below and will be implemented in **Milestone 4B — Learning Journey Foundation**. They are not included in the Milestone 4A implementation scope.
 
 ### 10.1 `reading_journeys`
 
+Represents structured learning curricula and milestone roadmaps.
+
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `user_id` | UUID | FK → `users.id` |
-| `goal_id` | UUID, nullable | FK → `reading_goals.id` |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE) |
+| `goal_id` | UUID, nullable | Part of composite FK `(goal_id, user_id) → reading_goals(id, user_id)` (ON DELETE SET NULL (goal_id)) |
 | `title` | VARCHAR(200) | Journey title |
 | `description` | TEXT, nullable | Journey summary |
 | `status` | VARCHAR(20) | `draft`, `active`, `completed`, `archived` |
 | `created_at` | TIMESTAMPTZ | Creation time |
 | `updated_at` | TIMESTAMPTZ | Last update |
 
+Constraints and behavior:
+- Status check: `CHECK (status IN ('draft', 'active', 'completed', 'archived'))`, default `'draft'`.
+- Composite FK for user ownership & deletion behavior:
+  `FOREIGN KEY (goal_id, user_id) REFERENCES reading_goals (id, user_id) ON DELETE SET NULL (goal_id)`
+  ensures a journey can only be attached to a goal owned by the same user. Using column-specific `ON DELETE SET NULL (goal_id)` (supported in PostgreSQL 15+) ensures that deleting a reading goal only nulls `goal_id` and does not attempt to null the non-nullable `user_id`. For database environments or tooling where column-specific `ON DELETE SET NULL` is not available, the safe alternative is service-layer disassociation (setting `goal_id = NULL` prior to goal deletion) or an explicit `BEFORE DELETE` trigger on `reading_goals`.
+- Index `(user_id, status)` for user journey dashboards.
+
 ### 10.2 `journey_stages`
 
-Represents ordered learning or reading stages.
+Represents progressive, ordered milestones within a journey.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `journey_id` | UUID | FK → `reading_journeys.id` |
-| `title` | VARCHAR(200) | Stage title |
+| `journey_id` | UUID | FK → `reading_journeys.id` (ON DELETE CASCADE) |
+| `subject_id` | UUID, nullable | FK → `subjects.id` (ON DELETE SET NULL) |
+| `title` | VARCHAR(200) | Stage title (e.g. "Foundational Concepts") |
 | `description` | TEXT, nullable | Stage objective |
-| `stage_order` | INTEGER | Position in journey |
-| `subject_id` | UUID, nullable | FK → `subjects.id` |
+| `stage_order` | INTEGER | Position in journey (`CHECK (stage_order >= 1)`) |
 | `status` | VARCHAR(20) | `locked`, `available`, `in_progress`, `completed` |
 | `created_at` | TIMESTAMPTZ | Creation time |
+| `updated_at` | TIMESTAMPTZ | Last update |
 
-Unique (`journey_id`, `stage_order`).
+Constraints and behavior:
+- Unambiguous sequence: `UNIQUE (journey_id, stage_order)` (`uq_journey_stages_journey_order`).
+- Status check: `CHECK (status IN ('locked', 'available', 'in_progress', 'completed'))`, default `'locked'`.
 
 ### 10.3 `journey_stage_books`
 
-Links suggested works to a stage.
+Links suggested canonical works to a journey stage.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `stage_id` | UUID | FK → `journey_stages.id` |
-| `work_id` | UUID | FK → `book_works.id` |
-| `selection_order` | INTEGER | Display order |
-| `is_required` | BOOLEAN | Whether the book is essential or optional |
-| `selection_reason` | TEXT, nullable | Why this book was selected |
+| `stage_id` | UUID | FK → `journey_stages.id` (ON DELETE CASCADE) |
+| `work_id` | UUID | FK → `book_works.id` (ON DELETE CASCADE) |
+| `selection_order` | INTEGER | Display order within stage (`CHECK (selection_order >= 1)`) |
+| `is_required` | BOOLEAN | Whether book is core or supplementary (default `false`) |
+| `selection_reason` | TEXT, nullable | Grounded reason for stage assignment |
+| `created_at` | TIMESTAMPTZ | Creation time |
 
-Unique (`stage_id`, `work_id`).
+Constraints:
+- Work uniqueness: `UNIQUE (stage_id, work_id)` (`uq_journey_stage_books_stage_work`).
+- Order uniqueness: `UNIQUE (stage_id, selection_order)` (`uq_journey_stage_books_stage_order`).
+- Position check: `CHECK (selection_order >= 1)` (`ck_journey_stage_books_selection_order`).
 
-## 11. Book embeddings
+## 11. Vectors and dynamic reader profiles (Milestone 4A)
 
 ### 11.1 `book_embeddings`
 
-Stores semantic representations at the work level.
+Stores semantic dense vector representations at the canonical work level.
 
 | Column | Type | Rules / purpose |
 |---|---|---|
 | `id` | UUID | Primary key |
-| `work_id` | UUID | FK → `book_works.id` |
-| `model_name` | VARCHAR(160) | Embedding model identifier |
-| `model_revision` | VARCHAR(160) | Pinned model revision |
-| `embedding` | VECTOR(384) | 384-dimensional vector |
-| `source_text_hash` | VARCHAR(128) | Hash of the exact input text |
+| `work_id` | UUID | FK → `book_works.id` (ON DELETE CASCADE) |
+| `model_name` | VARCHAR(160) | Model identifier (e.g. `'all-MiniLM-L6-v2'`) |
+| `model_revision` | VARCHAR(160) | Pinned Git commit hash / model revision |
+| `embedding` | VECTOR(384) | 384-dimensional dense vector |
+| `source_text_hash` | VARCHAR(128) | SHA-256 hash of constructed input text |
+| `is_active` | BOOLEAN | Whether this is the active embedding version (`default=true`) |
 | `created_at` | TIMESTAMPTZ | Generation time |
 
-Suggested initial candidate: `sentence-transformers/all-MiniLM-L6-v2`, which produces 384-dimensional embeddings. Treat this as a candidate, not a permanent commitment: benchmark retrieval quality, multilingual behavior, latency, and hosting cost before generating the full catalogue. Pin the exact model revision used in production.
+Constraints and behavior:
 
-Recommendations:
+- Idempotency & uniqueness: `UNIQUE (work_id, model_name, model_revision, source_text_hash)` (`uq_book_embeddings_work_model_hash`) prevents duplicate generation of identical representations.
+- Active version partial unique index:
+  ```sql
+  CREATE UNIQUE INDEX uq_book_embeddings_active_work
+  ON book_embeddings (work_id, model_name, model_revision)
+  WHERE is_active = true;
+  ```
+  Guarantees that at most one active embedding exists per canonical work for a given model revision (a work may have zero active embeddings if embedding generation is pending or deactivated).
+- Version lifecycle: When generating a replacement embedding (e.g. following catalogue metadata enrichment), deactivate the previous version (`is_active = false`) within the same transaction. Recommendation retrieval must strictly filter to active embeddings (`WHERE is_active = true`).
+- HNSW index:
+  ```sql
+  CREATE INDEX ix_book_embeddings_hnsw
+  ON book_embeddings
+  USING hnsw (embedding vector_cosine_ops);
+  ```
+- Work-level representation: Embeddings are generated per canonical work, not per physical edition.
+- Deployment prerequisites: Requires the `vector` extension in PostgreSQL (`CREATE EXTENSION IF NOT EXISTS vector;`). In production or managed cloud databases (RDS, Cloud SQL), the database user or migration role must have extension creation privileges, or the extension must be pre-enabled by an administrator.
 
-- Generate embeddings for works, not every edition.
-- Build the embedding input from useful work-level fields such as title, subtitle, description, authors, genres, and subjects.
-- Normalize and version the input construction process.
-- Regenerate an embedding when the source text or model revision changes.
-- Keep old model versions only if needed for migration, comparison, or rollback.
+### 11.2 `user_interest_profiles`
 
-Example index (choose parameters after measuring catalogue size and query behavior):
+Caches the normalized reader interest vector ($p_u$) and inferred topic affinity weights to enable fast vector retrieval without recomputing historical events on every recommendation request.
 
-```sql
-CREATE INDEX book_embeddings_vector_idx
-ON book_embeddings
-USING hnsw (embedding vector_cosine_ops);
-```
+| Column | Type | Rules / purpose |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `user_id` | UUID | FK → `users.id` (ON DELETE CASCADE), UNIQUE |
+| `model_name` | VARCHAR(160) | Embedding model matching `book_embeddings` |
+| `model_revision` | VARCHAR(160) | Pinned model revision matching `book_embeddings` |
+| `interest_vector` | VECTOR(384), nullable | Normalized 384-dim blended user interest vector |
+| `inferred_topics` | JSONB, nullable | Dict of topic affinity weights and interaction counters |
+| `interaction_count` | INTEGER | Processed interaction watermark (`CHECK (interaction_count >= 0)`), default 0 |
+| `last_calculated_at` | TIMESTAMPTZ, nullable | Timestamp of vector calculation |
+| `created_at` | TIMESTAMPTZ | Creation time |
+| `updated_at` | TIMESTAMPTZ | Last update |
 
-Use a uniqueness policy such as (`work_id`, `model_name`, `model_revision`, `source_text_hash`) to avoid duplicate generation of the same representation.
+Constraints and lifecycle behavior:
 
-## 12. Hybrid search design
+- One profile per user: `UNIQUE (user_id)` (`uq_user_interest_profiles_user_id`).
+- Interaction watermark definition: `interaction_count` is defined strictly as the number of interactions incorporated into the current profile vector.
+- Refresh triggers & configurable threshold:
+  1. Interaction threshold: Evaluated by comparing the number of newly eligible interactions against the processed watermark (`new_eligible_interactions - interaction_count >= refresh_threshold`). The threshold (e.g. 5+ new events) is configurable to avoid recalculating the profile for every single incoming event.
+  2. Explicit preference edit: Triggered immediately when a user updates favorite genres or subjects in `user_preferences`.
+  3. Model migration: When `model_name` or `model_revision` is bumped, vectors are marked for asynchronous recalculation.
+- Asynchronous refresh strategy: Profile re-vectorization runs asynchronously or as a background task to keep user interactions snappy. If `interest_vector` is null or outdated, recommendation retrieval blends available explicit onboarding preferences with cold-start heuristics.
 
 The MVP uses PostgreSQL search rather than introducing a separate search service.
 

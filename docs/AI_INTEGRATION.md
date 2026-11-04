@@ -339,8 +339,8 @@ Flow:
 5. Recommendation engine retrieves candidates using semantic, metadata, and text search.
 6. Deterministic filters remove ineligible or excluded books.
 7. Recommendation engine calculates scores, ranks, and diversifies candidates.
-8. Explanation service receives the final selected books, verified metadata, and reason codes.
-9. LLM generates concise explanations grounded in that supplied information.
+8. Explanation service receives the final selected books, verified metadata, and reason codes. Reason codes are validated against the controlled reason codes registry (`RECOMMENDATION_ENGINE.md` §15.1) stored on `recommendation_items`.
+9. LLM generates concise explanations strictly grounded in that supplied information without inventing external claims.
 10. Backend validates the explanations and returns the recommendations.
 
 **Important:** The LLM explains the result; it does not choose or reorder the final recommendations.
@@ -432,13 +432,17 @@ Recommendation explanations will be LLM-generated, but strictly grounded in dete
 - Relevant user-stated goal or preference, only when needed.
 - A short explanation length limit.
 
-Example reason codes:
-- `MATCHES_READING_GOAL`
-- `RELATED_TO_FAVORITE_SUBJECT`
-- `APPROPRIATE_DIFFICULTY`
-- `NEW_AUTHOR_DISCOVERY`
-- `BUILDS_ON_PREVIOUS_TOPIC`
-- `TBR_PRIORITY_MATCH`
+Reason codes (drawn strictly from the controlled reason registry; see `RECOMMENDATION_ENGINE.md` §15.1 and `DATABASE_SCHEMA.md` §9.2):
+- `MATCHES_CURRENT_GOAL`: Directly addresses the user's active reading goal.
+- `MATCHES_FAVORITE_SUBJECT`: Aligns with explicit reader subject preferences.
+- `SIMILAR_TO_HIGHLY_RATED_BOOK`: High semantic similarity to a book rated 4 or 5 by the user.
+- `BEGINNER_FRIENDLY`: Calibrated for reader's introductory proficiency level.
+- `INTRODUCES_NEW_AUTHOR`: Controlled discovery signal for an unread author.
+- `COMPLEMENTS_TBR`: High thematic synergy with books on user's TBR list.
+- `TOPIC_RELEVANCE`: Strong keyword or topic match with the user prompt.
+- `HIGH_BOOK_RATING`: Well-regarded work within the reader's interest cluster.
+- `POPULAR_IN_GENRE`: Strong exemplar within candidate genre.
+- `NEXT_STEP_IN_SUBJECT_JOURNEY`: Logical subsequent milestone in a structured reading sequence (supported future reason code; deferred to Milestone 4B with Learning Journeys).
 
 ### Rules
 

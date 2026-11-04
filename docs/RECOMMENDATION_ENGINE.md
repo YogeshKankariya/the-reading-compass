@@ -145,9 +145,15 @@ Store:
 
 - Work ID.
 - Model name and pinned revision.
-- Embedding vector.
+- Embedding vector (`VECTOR(384)`).
 - Hash of the source text used to generate it.
+- `is_active` boolean flag (`default=true`).
 - Generation timestamp.
+
+**Version lifecycle & active filtering:**
+- A partial unique index `(work_id, model_name, model_revision) WHERE is_active = true` ensures at most one active vector per work and model revision (a work may have zero active vectors if embedding generation is pending or deactivated).
+- When generating a replacement embedding, deactivate the previous version (`is_active = false`) within the same transaction.
+- Recommendation retrieval must strictly filter to active embeddings (`WHERE is_active = true`).
 
 Generate embeddings at the work level, not separately for every edition. Regenerate when the source document or model revision changes.
 
@@ -216,7 +222,7 @@ This is a baseline, not a claim that one vector captures a reader's entire ident
 
 Do not subtract weak or ambiguous signals as if they were explicit dislikes.
 
-### 6.4 Combining explicit and inferred preferences
+### 6.4 Combining explicit and inferred preferences & profile caching
 
 For cold-start and early-stage users, combine onboarding preferences with interaction-derived signals:
 
@@ -228,6 +234,19 @@ p_u = \operatorname{normalize}(\beta p_{\text{explicit}} +
 The value of \(\beta\) should depend on the amount and reliability of behavioral data. Initially, explicit preferences should dominate. As meaningful interactions accumulate, the behavioral component can gain influence.
 
 Keep the source of each preference distinguishable so users can correct inaccurate inferences.
+
+#### Cached reader profile: `user_interest_profiles`
+
+To keep recommendation generation responsive and avoid calculating $p_u$ over historical event streams on every request:
+
+1. **Storage:** The calculated unit vector $p_u$ is stored in `user_interest_profiles.interest_vector` (`VECTOR(384)`), along with `inferred_topics` JSONB and an `interaction_count` watermark.
+2. **Watermark definition:** `interaction_count` is defined strictly as the number of interactions incorporated into the current profile.
+3. **Refresh triggers & configurable threshold:**
+   - **Interaction threshold:** Evaluated by comparing the number of newly eligible interactions against the processed interaction count (`new_eligible_interactions - interaction_count >= refresh_threshold`). The threshold (e.g. 5+ new events) is configurable to avoid recalculating the profile for every incoming event.
+   - **Explicit preference update:** Triggered immediately when a user modifies their genre or subject preferences.
+   - **Model revision upgrade:** Triggered when the catalogue embedding model or revision changes.
+4. **Asynchronous refresh:** Vector recalculation runs asynchronously or as a background job so that user interactions remain low-latency. If the cached vector is null (cold start) or pending update, candidate retrieval falls back to explicit preference heuristics.
+5. **Model revision compatibility:** The cached vector must match the `model_name` and pinned `model_revision` of `book_embeddings` to prevent vector space misalignment.
 
 ## 7. Candidate generation
 
@@ -323,9 +342,14 @@ Where:
 
 These weights are starting hypotheses for the first baseline. They must be configurable, versioned, and evaluated. Do not present them as scientifically validated values.
 
-### 9.2 Feature normalization
+### 9.2 Feature normalization & score semantics
 
-All component scores must be transformed to comparable ranges before combining them. Define how missing features are handled.
+All component scores must be transformed to comparable ranges in $[0, 1]$ before combining them. The combined final score is strictly normalized to $0 \le S \le 1$.
+
+**Score interpretation & auditability:**
+- The final score is a deterministic, normalized ranking value representing relative suitability among candidate books.
+- It is **not** a probability, confidence percentage, or objective measure of literary quality.
+- Component feature scores are preserved in `recommendation_items.score_breakdown` at recommendation time for auditability, explainability, and evaluation.
 
 For example:
 
@@ -470,18 +494,22 @@ Capture explicit feedback where practical:
 - Rating after reading.
 - Optional reason for dismissal.
 
+**Feedback architecture:**
+- **State storage:** Explicit recommendation item feedback (`helpful`, `not_helpful`, `save`, `dismiss`, optional reason string, and submission timestamp) is stored directly on `recommendation_items` (`feedback_type`, `feedback_reason`, `feedback_at`). This reflects the latest state of the recommendation item for fast queryability and evaluation metrics.
+- **Event stream:** Each feedback action simultaneously generates an immutable event in `user_interactions` (`recommendation_helpful`, `recommendation_not_helpful`, `save`, `dismiss`) to preserve historical event progression and feed the dynamic reader profile update loop.
+
 Continue recording behavioral events such as views, clicks, starts, progress, and completions.
 
 ### 13.2 Updating the reader profile
 
 For the MVP:
 
-1. Store every relevant interaction as an event.
+1. Store every relevant interaction as an event in `user_interactions`.
 2. Apply documented signal weights.
-3. Recompute or incrementally update reader features.
+3. Update or recompute `user_interest_profiles` after interaction thresholds or preference edits.
 4. Keep explicit preferences separate from inferred preferences.
 5. Allow users to correct inferred interests.
-6. Version the profile-building logic.
+6. Version the profile-building logic and algorithm configuration.
 
 Do not immediately retrain a machine-learning model after every interaction. A deterministic profile update is easier to debug and evaluate at the beginning.
 
@@ -524,23 +552,31 @@ If metadata is too sparse, keep it searchable by exact title/author where possib
 
 Blend explicit preferences with the few reliable interactions available. Increase reliance on behavior gradually as the signal count and quality improve.
 
-## 15. Explainability
+## 15. Explainability & Controlled Reason Registry
 
-Each recommendation should have structured reasons generated from the ranking features and verified catalogue data.
+Each recommendation must have structured, grounded reason codes generated from the ranking features and verified catalogue data.
 
-Example reason codes:
+### 15.1 Controlled Reason Registry
 
-- `MATCHES_CURRENT_GOAL`
-- `MATCHES_FAVORITE_SUBJECT`
-- `SIMILAR_TO_HIGHLY_RATED_BOOK`
-- `BEGINNER_FRIENDLY`
-- `INTRODUCES_NEW_AUTHOR`
-- `COMPLEMENTS_TBR`
-- `NEXT_STEP_IN_SUBJECT_JOURNEY`
+Reason codes must come strictly from an approved registry:
 
-The LLM may turn these into natural language, but it must only use supplied reason codes and metadata. It must not invent claims such as “this is the most influential book in the field” without a trusted source.
+- `MATCHES_CURRENT_GOAL`: Directly addresses the user's active reading goal.
+- `MATCHES_FAVORITE_SUBJECT`: Aligns with explicit reader subject preferences.
+- `SIMILAR_TO_HIGHLY_RATED_BOOK`: High semantic similarity to a book rated 4 or 5 by the user.
+- `BEGINNER_FRIENDLY`: Calibrated for reader's introductory proficiency level.
+- `INTRODUCES_NEW_AUTHOR`: Controlled discovery signal for an unread author.
+- `COMPLEMENTS_TBR`: High thematic synergy with books on user's TBR list.
+- `TOPIC_RELEVANCE`: Strong keyword or topic match with the user prompt.
+- `HIGH_BOOK_RATING`: Well-regarded work within the reader's interest cluster.
+- `POPULAR_IN_GENRE`: Strong exemplar within candidate genre.
+- `NEXT_STEP_IN_SUBJECT_JOURNEY`: Serves as the logical subsequent milestone in a structured reading sequence (supported future reason code; deferred to Milestone 4B when Learning Journeys are implemented).
 
-Keep the explanation separate from the numeric ranking calculation so generated prose cannot alter the result.
+### 15.2 Grounded LLM Explanation Boundary
+
+The LLM may translate these structured codes and verified metadata into clear, conversational prose, but:
+1. It must only use supplied reason codes and metadata.
+2. It must never invent ungrounded claims, awards, historical influence, or credentials.
+3. Keep the explanation generation strictly downstream from the ranking calculation so prose generation cannot alter the deterministic ordering.
 
 ## 16. Evaluation strategy
 
@@ -720,38 +756,20 @@ Test the recommendation engine at multiple levels.
 
 ## 21. Phased implementation plan
 
-### Phase 1 — Deterministic baseline
+### Milestone 4A — Recommendation Foundation (Current Scope)
 
-- Build catalogue feature extraction.
-- Implement explicit reader preferences.
-- Implement metadata and text candidate retrieval.
-- Implement configurable hybrid scoring.
-- Add eligibility filters and reason codes.
-- Persist recommendation requests and results.
+- **Reading Goals:** Implement `reading_goals` with composite uniqueness `(id, user_id)` for journey isolation.
+- **Book Embeddings:** Benchmark and pin 384-dimensional model; implement `book_embeddings` with HNSW cosine index.
+- **Dynamic Reader Profile:** Implement `user_interest_profiles` caching 384-dimensional $p_u$ vector and topic affinities.
+- **Recommendation Persistence:** Implement `recommendation_requests` and `recommendation_items` with score breakdowns and reason codes.
+- **Recommendation Feedback:** Store `feedback_type`, `feedback_reason`, and `feedback_at` on `recommendation_items`; emit `recommendation_helpful` and `recommendation_not_helpful` in `user_interactions`.
 
-### Phase 2 — Semantic recommendations
+### Milestone 4B — Learning Journey Foundation (Next Scope)
 
-- Benchmark and pin a 384-dimensional embedding model.
-- Generate work embeddings.
-- Add pgvector retrieval.
-- Combine semantic and metadata candidates.
-- Evaluate semantic-only versus hybrid ranking.
-
-### Phase 3 — Personalization and diversity
-
-- Capture interactions and explicit feedback.
-- Build reader interest vectors.
-- Add context-specific ranking configurations.
-- Add MMR and exploration controls.
-- Evaluate cold-start and repeat-user behavior.
-
-### Phase 4 — TBR and reading journeys
-
-- Implement TBR-only prioritization.
-- Map goals to controlled subjects.
-- Add prerequisite-aware stage ordering.
-- Generate editable journey suggestions.
-- Test journey usefulness with beta users.
+- **Reading Journeys:** Implement `reading_journeys` with composite FK `(goal_id, user_id)` to prevent cross-user goal references.
+- **Journey Stages:** Implement `journey_stages` with subject links and sequential stage ordering.
+- **Curated Stage Books:** Implement `journey_stage_books` with `UNIQUE(stage_id, selection_order)` and `CHECK(selection_order >= 1)`.
+- **Topological Sequencing:** Prerequisite subject DAG and stage construction algorithms.
 
 ### Phase 5 — Evaluation and refinement
 
