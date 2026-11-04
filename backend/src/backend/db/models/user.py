@@ -22,8 +22,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.db.base import Base
 
 if TYPE_CHECKING:
+    from backend.db.models.goal import ReadingGoal
     from backend.db.models.interaction import UserInteraction
     from backend.db.models.library import BookRating, ReadingList, UserBook
+    from backend.db.models.recommendation import (
+        RecommendationRequest,
+        UserInterestProfile,
+    )
 
 
 class User(Base):
@@ -113,6 +118,25 @@ class User(Base):
     )
     interactions: Mapped[list[UserInteraction]] = relationship(
         "UserInteraction",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    goals: Mapped[list[ReadingGoal]] = relationship(
+        "ReadingGoal",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    interest_profile: Mapped[UserInterestProfile | None] = relationship(
+        "UserInterestProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    recommendation_requests: Mapped[list[RecommendationRequest]] = relationship(
+        "RecommendationRequest",
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,

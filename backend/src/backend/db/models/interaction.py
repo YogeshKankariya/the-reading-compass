@@ -66,7 +66,7 @@ class UserInteraction(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "interaction_type IN ('view', 'click', 'save', 'dismiss', 'rate', 'start', 'progress', 'complete', 'abandon', 'recommendation_click')",
+            "interaction_type IN ('view', 'click', 'save', 'dismiss', 'rate', 'start', 'progress', 'complete', 'abandon', 'recommendation_click', 'recommendation_helpful', 'recommendation_not_helpful')",
             name="ck_user_interactions_type",
         ),
         CheckConstraint(

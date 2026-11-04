@@ -24,6 +24,7 @@ from backend.db.base import Base
 
 if TYPE_CHECKING:
     from backend.db.models.author import Author, BookWorkAuthor
+    from backend.db.models.embedding import BookEmbedding
     from backend.db.models.genre import BookWorkGenre, Genre
     from backend.db.models.interaction import UserInteraction
     from backend.db.models.library import (
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ReadingListBook,
         UserBook,
     )
+    from backend.db.models.recommendation import RecommendationItem
     from backend.db.models.subject import BookWorkSubject, Subject
 
 
@@ -158,6 +160,18 @@ class BookWork(Base):
     )
     interactions: Mapped[list[UserInteraction]] = relationship(
         "UserInteraction",
+        back_populates="work",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    embeddings: Mapped[list[BookEmbedding]] = relationship(
+        "BookEmbedding",
+        back_populates="work",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    recommendation_items: Mapped[list[RecommendationItem]] = relationship(
+        "RecommendationItem",
         back_populates="work",
         cascade="all, delete-orphan",
         passive_deletes=True,

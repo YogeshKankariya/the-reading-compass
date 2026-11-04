@@ -1,7 +1,9 @@
 from backend.db.base import Base
 from backend.db.models.author import Author, BookWorkAuthor
 from backend.db.models.book import BookEdition, BookWork
+from backend.db.models.embedding import BookEmbedding
 from backend.db.models.genre import BookWorkGenre, Genre
+from backend.db.models.goal import ReadingGoal
 from backend.db.models.interaction import UserInteraction
 from backend.db.models.library import (
     BookRating,
@@ -9,6 +11,11 @@ from backend.db.models.library import (
     ReadingListBook,
     ReadingProgress,
     UserBook,
+)
+from backend.db.models.recommendation import (
+    RecommendationItem,
+    RecommendationRequest,
+    UserInterestProfile,
 )
 from backend.db.models.subject import BookWorkSubject, Subject
 from backend.db.models.user import (
@@ -38,4 +45,9 @@ __all__ = [
     "ReadingList",
     "ReadingListBook",
     "UserInteraction",
+    "ReadingGoal",
+    "BookEmbedding",
+    "UserInterestProfile",
+    "RecommendationRequest",
+    "RecommendationItem",
 ]
