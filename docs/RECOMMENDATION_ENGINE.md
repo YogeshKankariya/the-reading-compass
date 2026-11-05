@@ -144,7 +144,7 @@ This is a candidate model, not an irreversible choice. Benchmark it on represent
 Store:
 
 - Work ID.
-- Model name and pinned revision.
+- Model name and pinned revision (explicitly unset/None during initial setup until verified and benchmarked).
 - Embedding vector (`VECTOR(384)`).
 - Hash of the source text used to generate it.
 - `is_active` boolean flag (`default=true`).
