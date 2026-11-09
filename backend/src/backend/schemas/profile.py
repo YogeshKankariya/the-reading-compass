@@ -184,7 +184,9 @@ class ProfileRefreshResult(BaseModel):
     refresh_required: bool
     refresh_completed: bool
     reason: Literal[
+        "initial_profile",
         "threshold_reached",
+        "authoritative_state_change",
         "explicit_preference_change",
         "model_revision_mismatch",
         "forced",

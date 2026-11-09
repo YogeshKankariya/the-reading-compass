@@ -328,6 +328,30 @@ Stored in `user_interest_profiles.inferred_topics` as `InferredTopicsPayload` JS
    - Negative signals are strictly isolated and never subtract from genre or subject affinity (dismissals and abandonments do not penalize entire topics).
    - Categorized into `dismissed_work_ids`, `abandoned_work_ids`, `low_rated_work_ids`, and `not_helpful_work_ids` (capped at 50 most recent distinct work IDs each), with `all_negative_work_ids` capped at 100.
 
+#### Profile orchestration & concurrency control
+
+Orchestration is coordinated by `ProfileService`:
+1. **Freshness evaluation & trigger classification:**
+   Evaluated in `should_refresh_profile(...)` with typed reasons:
+   - `initial_profile`: No profile exists or `last_calculated_at` is null.
+   - `forced`: Explicit recalculation requested.
+   - `model_revision_mismatch`: Configured embedding model or pinned revision changed.
+   - `explicit_preference_change`: Detected via SHA-256 hash comparison (`explicit_preference_hash` stored in `inferred_topics["meta"]`), detecting additions, weight edits, and deletions without database triggers.
+   - `authoritative_state_change`: Detected via SHA-256 state fingerprint comparison (`authoritative_state_fingerprint` stored in `inferred_topics["meta"]`). Historical rating watermark deduplication intentionally deduplicates ratings per work; consequently, modifying or deleting an existing `BookRating`, changing `UserBook.status` (e.g. from `currently_reading` to `completed`), advancing `ReadingProgress` (`progress_percent`, `last_read_at`), or updating `RecommendationItem` feedback (`feedback_type`, `feedback_at`) does not increase the eligible interaction count. The fingerprint canonically serializes and hashes all active ratings (`R|<work_id>|<rating>`), library books & reading progress (`B|<work_id>|<status>|<progress_percent>|<last_read_at>`), and recommendation feedback (`F|<work_id>|<feedback_type>|<feedback_at>`), detecting any additions, mutations, or deletions.
+   - `threshold_reached`: Newly eligible interactions $\ge \text{PROFILE\_REFRESH\_THRESHOLD}$ (5) relative to the stored watermark, or new compatible active embeddings added to the catalogue (`created_at > last_calculated_at`).
+   - `none`: Profile is fresh.
+2. **Transaction ownership & atomicity:**
+   `ProfileService` owns the transaction boundary. Child extractors and calculators never commit. Failed calculations roll back completely, preserving the existing database profile.
+3. **PostgreSQL transaction advisory locks (`pg_advisory_xact_lock`):**
+   A stable signed 64-bit key is derived via SHA-256 with domain prefix `b"profile_refresh_lock:"` and acquired inside the transaction. Concurrent refresh requests for the same user serialize, and double-checked locking re-evaluates freshness after lock acquisition so waiting callers immediately reuse the newly refreshed profile without duplicate recalculation.
+4. **Transaction snapshot consistency:**
+   Under PostgreSQL `READ COMMITTED`, all queries for a user execute after `pg_advisory_xact_lock` is acquired.
+   - **Why a 2-transaction lock-then-repeatable-read sequence is flawed in PostgreSQL:** Transaction-level advisory locks (`pg_advisory_xact_lock`) are strictly released on transaction commit/rollback; committing Transaction 1 releases the lock before Transaction 2 begins. Session-level locks (`pg_advisory_lock`) cannot be safely used in pooled connection architectures (e.g. PgBouncer, SQLAlchemy connection pool) because abnormal client termination or pooled connection reuse leaks locks across clients.
+   - **Why REPEATABLE READ snapshot timing fails:** In PostgreSQL, a `REPEATABLE READ` transaction takes its data snapshot during its first query. If a waiting transaction executes `SELECT pg_advisory_xact_lock(...)` under `REPEATABLE READ`, its snapshot is frozen *before* the prior lock holder commits. When the prior holder commits and the lock is acquired, the waiting transaction cannot see the newly committed profile, falsely triggers recalculation, and fails with a PostgreSQL serialization error (SQLSTATE 40001: `could not serialize access due to concurrent update`) upon attempting to update `user_interest_profiles`.
+   - **The READ COMMITTED guarantee:** Under `READ COMMITTED`, every SQL statement obtains a fresh, current snapshot of committed data. Upon acquiring `pg_advisory_xact_lock`, the double-check `SELECT` query immediately observes the committed profile from the prior worker. Setting the stored profile watermark strictly to `extracted_signals.eligible_interaction_count` guarantees exact snapshot alignment between the vector and the watermark.
+5. **Asynchronous background tasks:**
+   Managed via FastAPI `BackgroundTasks` with independent `AsyncSession` instances and in-flight deduplication.
+
 ## 7. Candidate generation
 
 Candidate generation finds a manageable pool of potentially relevant works. Ranking then orders that pool.

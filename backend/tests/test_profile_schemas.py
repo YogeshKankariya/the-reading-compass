@@ -561,6 +561,28 @@ class TestProfileRefreshResultSchema:
         assert r2.refresh_required is False
         assert r2.reason == "none"
 
+        r3 = ProfileRefreshResult(
+            refresh_required=True,
+            refresh_completed=True,
+            reason="initial_profile",
+            previous_interaction_count=None,
+            current_interaction_count=0,
+            calculated_at=datetime.now(timezone.utc),
+        )
+        assert r3.refresh_required is True
+        assert r3.reason == "initial_profile"
+
+        r4 = ProfileRefreshResult(
+            refresh_required=True,
+            refresh_completed=True,
+            reason="authoritative_state_change",
+            previous_interaction_count=5,
+            current_interaction_count=5,
+            calculated_at=datetime.now(timezone.utc),
+        )
+        assert r4.refresh_required is True
+        assert r4.reason == "authoritative_state_change"
+
     def test_invalid_reason_rejected(self):
         with pytest.raises(ValidationError):
             ProfileRefreshResult(
