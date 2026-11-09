@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from backend.services.profile.signal_extractor import (
+    ExtractedProfileSignals,
+    ProfileSignalExtractor,
+)
 from backend.services.profile.vector_builder import (
     BehavioralVectorResult,
     BlendedVectorResult,
@@ -18,6 +22,8 @@ from backend.services.profile.vector_builder import (
 __all__ = [
     "BehavioralVectorResult",
     "BlendedVectorResult",
+    "ExtractedProfileSignals",
+    "ProfileSignalExtractor",
     "ProfileVectorBuildResult",
     "blend_profile_vectors",
     "build_behavioral_vector",

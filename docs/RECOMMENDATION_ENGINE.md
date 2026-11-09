@@ -183,20 +183,65 @@ Start with onboarding choices:
 
 Explicit preferences should have higher trust than weak inferred signals. Users must be able to edit or remove them.
 
-### 6.2 Interaction signals
+### 6.2 Interaction signals and signal-source precedence
 
-Store events in `user_interactions`. Initial signal strengths are hypotheses for experimentation, not fixed truths.
+Store events in `user_interactions`. Initial signal strengths and precedence rules are established to extract clean, un-distorted reader preferences.
 
-| Interaction | Initial interpretation | Notes |
-|---|---|---|
-| High rating | Strong positive | Use the actual rating value |
-| Low rating | Strong negative | Do not infer dislike from a single ambiguous event without context |
-| Save to TBR | Positive interest | Stronger than a view |
-| Click/open details | Weak positive | May reflect curiosity, not preference |
-| Dismiss recommendation | Negative for this recommendation | Avoid assuming dislike of its entire genre |
-| Start reading | Positive intent | Does not prove satisfaction |
-| Complete book | Engagement signal | Completion alone is not necessarily a positive rating |
-| Abandon book | Ambiguous/possibly negative | Could be due to timing, difficulty, or life circumstances |
+#### 6.2.1 Configured signal weights and polarities
+
+| Interaction identifier | Weight | Polarity | Description / Authority |
+|---|---|---|---|
+| `rate_5` | `+1.00` | Positive | Authoritative 5-star rating from `book_ratings` |
+| `rate_4` | `+0.75` | Positive | Authoritative 4-star rating from `book_ratings` |
+| `rate_3` | `+0.10` | Neutral | Authoritative 3-star rating (neutral/topic signal) |
+| `rate_2` | `-0.40` | Negative | Authoritative 2-star rating from `book_ratings` |
+| `rate_1` | `-0.80` | Negative | Authoritative 1-star rating from `book_ratings` |
+| `recommendation_helpful` | `+0.50` | Positive | Explicit helpful feedback from `recommendation_items` |
+| `recommendation_not_helpful`| `-0.40` | Negative | Explicit not-helpful feedback from `recommendation_items` |
+| `save` | `+0.60` | Positive | Active TBR shelf in `user_books` (`want_to_read`) |
+| `complete` | `+0.50` | Positive | Terminal completed reading lifecycle in `user_books` |
+| `start` | `+0.30` | Positive | Active `currently_reading` or `paused` in `user_books` |
+| `progress` | `+0.25` | Positive | Reading progress milestone |
+| `abandon` | `-0.20` | Negative | Abandoned book in `user_books` (unless restarted) |
+| `dismiss` | `-0.15` | Negative | Work-specific dismissal (unless superseded by positive action) |
+| `recommendation_click` | `+0.15` | Positive | Clicked recommended book details (passive) |
+| `click` | `+0.10` | Positive | Clicked catalogue book details (passive) |
+| `view` | `+0.05` | Positive | Viewed book card or details page (passive) |
+
+#### 6.2.2 Work-level precedence hierarchy
+
+A reader may interact with a work through multiple orthogonal families (e.g., rating, reading progress, recommendation feedback, library shelving). The vector builder requires exactly one resolved behavioral signal per work. Rather than applying non-linear or additive summing that distorts calibrated weights, the system enforces **deterministic priority selection**:
+
+$$\text{Rating} \succ \text{Reading Lifecycle} \succ \text{Recommendation Feedback} \succ \text{Library Save (TBR)} \succ \text{Passive Browsing}$$
+
+1. **Rating family precedence:**
+   - `BookRating` (`uq_book_ratings_user_work`) is the sole authoritative state of a user's current rating.
+   - Historical `rate` interactions for that work are superseded and not double-counted.
+   - A non-neutral rating ($1, 2, 4, 5$ stars) strictly supersedes all lower-priority families (Lifecycle, Feedback, Save, Passive).
+2. **Neutral-rating exception:**
+   - A 3-star rating (`rate_3`, `+0.10`) is neutral for directional vector construction and preserved as a neutral/topic-only signal.
+   - It **must not suppress** a non-neutral signal from a lower-priority family (e.g. a `completed` reading lifecycle at `+0.50` or `recommendation_helpful` at `+0.50`). In such cases, the non-neutral signal becomes the primary `ResolvedWorkSignal`, while the 3-star rating is retained in `neutral_signals`.
+   - When a 3-star rating is the sole explicit signal for a work, it resolves as the work's primary signal with `polarity="neutral"`.
+3. **Reading lifecycle resolution:**
+   - Active `UserBook` status (`completed`, `currently_reading`, `paused`, `abandoned`) and `ReadingProgress` determine lifecycle state.
+   - **Terminal completion dominance:** `status == 'completed'` (`+0.50`) represents the culmination of the reading attempt and subsumes earlier `start` (`+0.30`) and `progress` (`+0.25`) events.
+   - **Paused state:** `status == 'paused'` resolves to the lifecycle family with in-progress weight `start` (`+0.30`). It is not treated as a TBR save and does not inherit prior abandonment. Timestamp is evaluated as `progress.last_read_at`, falling back to `user_book.updated_at`.
+   - **Abandonment and restart:** An abandonment signal (`-0.20`) applies if `status == 'abandoned'` and no later restart occurred. A subsequent restart (`currently_reading`, `completed`, or a later `start` interaction) completely supersedes the earlier abandonment.
+4. **Library save (TBR):**
+   - `UserBook.status == 'want_to_read'` represents an active TBR bookmark (`+0.60`). If the book transitions to active reading or completion, the save is subsumed by the Lifecycle family.
+5. **Dismissals and supersession:**
+   - Work-specific dismissals carry weight `-0.15` (negative). They never penalize authors, subjects, or entire genres.
+   - If a reader subsequently takes an explicit positive action (saving to TBR, starting reading, or rating $\ge 4$), the subsequent positive action completely supersedes and cancels the dismissal.
+6. **Passive interaction ceiling and suppression:**
+   - If any explicit signal (Rating, Lifecycle, Recommendation Feedback, TBR Save, Dismissal) exists for a work, all passive events (`recommendation_click`, `click`, `view`) are **completely suppressed**.
+   - If only passive events exist for a work, the single strongest event wins deterministically (`recommendation_click` `+0.15` > `click` `+0.10` > `view` `+0.05`). Repeated views and clicks are **never summed**.
+
+#### 6.2.3 Passive throttling window
+
+To prevent rapid browsing, page refreshes, and repetitive clicks from distorting watermark activity counters, passive events (`view`, `click`, `recommendation_click`) on the same `(user_id, work_id)` apply a **1-hour anchor-based sliding cooldown** (`PASSIVE_THROTTLING_WINDOW_SECONDS = 3600.0`):
+- When a passive event is accepted, an anchor timestamp is recorded for that work.
+- Subsequent passive events on the same work occurring within 1 hour ($< 3600\text{s}$) of the anchor are throttled and do not advance the anchor.
+- The next passive event occurring $\ge 1\text{ hour}$ after the anchor is accepted and resets the anchor. This prevents starvation while suppressing burst browsing.
 
 ### 6.3 Reader interest vector
 
@@ -240,13 +285,27 @@ Keep the source of each preference distinguishable so users can correct inaccura
 To keep recommendation generation responsive and avoid calculating $p_u$ over historical event streams on every request:
 
 1. **Storage:** The calculated unit vector $p_u$ is stored in `user_interest_profiles.interest_vector` (`VECTOR(384)`), along with `inferred_topics` JSONB and an `interaction_count` watermark.
-2. **Watermark definition:** `interaction_count` is defined strictly as the number of interactions incorporated into the current profile.
+2. **Watermark definition and event eligibility:**
+   `interaction_count` is defined strictly as the number of interactions incorporated into the current profile. An interaction event is **eligible** to count toward the watermark if and only if:
+   - **Targeted work:** `work_id IS NOT NULL` (general navigation and onboarding events lacking a work target are excluded).
+   - **Supported type whitelist:** Belongs to the 12 approved types (`'rate'`, `'complete'`, `'start'`, `'abandon'`, `'save'`, `'dismiss'`, `'recommendation_helpful'`, `'recommendation_not_helpful'`, `'progress'`, `'recommendation_click'`, `'click'`, `'view'`).
+   - **Authoritative rating deduplication:** Historical `rate` interactions that correspond to an active `BookRating` record count exactly once. Orphan `rate` events (where the user subsequently deleted their rating) are excluded.
+   - **Authoritative TBR save deduplication:** Historical `save` interactions for a book currently active on the TBR shelf (`UserBook.status == 'want_to_read'`) count once.
+   - **Passive throttling window:** Consecutive passive events (`view`, `click`, `recommendation_click`) on the same `(user_id, work_id)` within a 1-hour anchor-based cooldown window (`PASSIVE_THROTTLING_WINDOW_SECONDS = 3600.0`) are treated as a single eligible event.
+   - **Distinct lifecycle milestones preserved:** Distinct historical lifecycle milestones (`start`, `progress`, `complete`) count separately toward the watermark because they represent distinct user engagement over time, even though work-level resolution later resolves to terminal completion.
+   - **Embedding-agnostic counting:** Events on works that do not yet have compatible embeddings **do count** toward the watermark; subsequent active embedding generation acts as a catalogue-driven refresh trigger.
+   - **Shared implementation:** Signal extraction and watermark query use the exact same eligibility logic to prevent counter drift.
 3. **Refresh triggers & configurable threshold:**
    - **Interaction threshold:** Evaluated by comparing the number of newly eligible interactions against the processed interaction count (`new_eligible_interactions - interaction_count >= refresh_threshold`). The threshold (e.g. 5+ new events) is configurable to avoid recalculating the profile for every incoming event.
    - **Explicit preference update:** Triggered immediately when a user modifies their genre or subject preferences.
-   - **Model revision upgrade:** Triggered when the catalogue embedding model or revision changes.
+   - **Model revision upgrade / embedding backfill:** Triggered when the catalogue embedding model or revision changes, or when active embeddings are backfilled for works in the reader's library or interaction history.
 4. **Asynchronous refresh:** Vector recalculation runs asynchronously or as a background job so that user interactions remain low-latency. If the cached vector is null (cold start) or pending update, candidate retrieval falls back to explicit preference heuristics.
-5. **Model revision compatibility:** The cached vector must match the `model_name` and pinned `model_revision` of `book_embeddings` to prevent vector space misalignment.
+5. **Exact embedding model and revision compatibility:**
+   - **Active-only:** Queries filter strictly by `is_active = true`.
+   - **Exact matching:** Must match configured `model_name` (`PROFILE_EMBEDDING_MODEL_NAME`) and pinned `model_revision` (`PROFILE_EMBEDDING_MODEL_REVISION`).
+   - **At most one active embedding:** Guaranteed by the partial unique index `uq_book_embeddings_active_work` on `(work_id, model_name, model_revision)` WHERE `is_active = true`.
+   - **Strict unset revision rule:** An unpinned or unset model revision (`None`) must **never** be treated as a wildcard (`LIKE '%'`) or omitted from the query filter. When `PROFILE_EMBEDDING_MODEL_REVISION` is unset, embedding retrieval is safely bypassed with typed status `revision_unspecified`, falling back to cold-start explicit preference heuristics.
+   - **Dimensionality safeguard:** Only embeddings with exactly 384 finite float components and norm $\ge \epsilon$ are accepted.
 
 ## 7. Candidate generation
 
