@@ -4,6 +4,10 @@ from backend.services.profile.signal_extractor import (
     ExtractedProfileSignals,
     ProfileSignalExtractor,
 )
+from backend.services.profile.topic_calculator import (
+    ProfileTopicCalculator,
+    calculate_topic_affinities,
+)
 from backend.services.profile.vector_builder import (
     BehavioralVectorResult,
     BlendedVectorResult,
@@ -24,12 +28,14 @@ __all__ = [
     "BlendedVectorResult",
     "ExtractedProfileSignals",
     "ProfileSignalExtractor",
+    "ProfileTopicCalculator",
     "ProfileVectorBuildResult",
     "blend_profile_vectors",
     "build_behavioral_vector",
     "build_explicit_preference_vector",
     "build_user_interest_profile_vector",
     "calculate_recency_decay",
+    "calculate_topic_affinities",
     "l2_norm",
     "normalize_vector",
     "validate_and_normalize_vector",

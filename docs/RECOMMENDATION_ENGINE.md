@@ -307,6 +307,27 @@ To keep recommendation generation responsive and avoid calculating $p_u$ over hi
    - **Strict unset revision rule:** An unpinned or unset model revision (`None`) must **never** be treated as a wildcard (`LIKE '%'`) or omitted from the query filter. When `PROFILE_EMBEDDING_MODEL_REVISION` is unset, embedding retrieval is safely bypassed with typed status `revision_unspecified`, falling back to cold-start explicit preference heuristics.
    - **Dimensionality safeguard:** Only embeddings with exactly 384 finite float components and norm $\ge \epsilon$ are accepted.
 
+#### Inferred topics & affinities: `inferred_topics`
+
+Stored in `user_interest_profiles.inferred_topics` as `InferredTopicsPayload` JSONB:
+1. **Per-work recency decay before aggregation:** Each eligible work is decayed individually via $w_{\text{decayed}}(w) = w_{\text{base}}(w) \times 2^{-\Delta t_w / \tau}$ ($\tau = 180$ days) before topic summation.
+2. **Topic contributions:**
+   - Genre: $c(w, g) = w_{\text{decayed}}(w) \times 1.0$.
+   - Subject: $c(w, s) = w_{\text{decayed}}(w) \times r(w, s)$, where $r(w, s)$ is `BookWorkSubject.relevance_weight` (defaults to $1.0$ if null).
+3. **Max-score normalization:**
+   - Raw score: $S(T) = \sum_{w \in W^+(T)} c(w, T)$ across distinct contributing works.
+   - Normalized affinity: $A(T) = S(T) / \max_{T'} S(T')$, bounded strictly in $[0.0, 1.0]$. Evaluates safely to $0.0$ if max score is below near-zero epsilon ($\epsilon = 10^{-6}$).
+4. **Metadata semantics:**
+   - `interaction_count`: Number of distinct contributing works ($|W^+(T)|$).
+   - `last_interacted_at`: Latest contributing work signal timestamp (UTC-normalized).
+   - Keys: Stable UUID strings (`str(genre_id)`, `str(subject_id)`).
+5. **Neutral signal topic exposure:**
+   - Neutral signals ($w > 0$, e.g. 3-star ratings) contribute to topic exposure when no primary positive signal exists for that work.
+   - Primary positive signals strictly supersede neutral signals; a work never double-counts.
+6. **Negative signal isolation and bounding:**
+   - Negative signals are strictly isolated and never subtract from genre or subject affinity (dismissals and abandonments do not penalize entire topics).
+   - Categorized into `dismissed_work_ids`, `abandoned_work_ids`, `low_rated_work_ids`, and `not_helpful_work_ids` (capped at 50 most recent distinct work IDs each), with `all_negative_work_ids` capped at 100.
+
 ## 7. Candidate generation
 
 Candidate generation finds a manageable pool of potentially relevant works. Ranking then orders that pool.
