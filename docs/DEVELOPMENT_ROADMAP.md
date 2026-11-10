@@ -328,7 +328,15 @@ Deliver the deterministic recommendation system that forms the core product valu
 
 ### Tasks
 
-- Define and implement reader-profile representation.
+- **Milestone 5.1 — User Interest Profile Foundation (Completed):**
+  - Profile configuration, internal schemas, pure Rocchio/blending vector mathematics, signal extraction and precedence, topic affinity calculation, transactional orchestration (`pg_advisory_xact_lock`, freshness fingerprinting), and FastAPI background refresh tasks.
+- **Milestone 5.2 — Candidate Generation & Retrieval (100 unique eligible candidate target):**
+  - **5.2.1 Retrieval Foundation & Contracts:** Retrieval configuration, `CandidateBook` & retrieval contracts, retrieval-source provenance definitions, 100-candidate target configuration, eligibility policy contracts, and retrieval service interfaces.
+  - **5.2.2 Semantic Candidate Retrieval:** PostgreSQL pgvector cosine-distance retrieval using `UserInterestProfile.interest_vector`, exact model/revision compatibility, active embedding validation, and bounded retrieval limits.
+  - **5.2.3 Metadata Retrieval & Cold Start:** Deterministic genre, subject, and supported explicit author matching, inferred topic matching, and cold-start retrieval when `interest_vector` is `NULL`.
+  - **5.2.4 Candidate Merging & Eligibility:** Channel merging with `work_id` deduplication and full provenance preservation, independent eligibility rules, incomplete catalogue safety, and bounded retrieval expansion when filtering reduces pool size below 100.
+  - **5.2.5 Retrieval Orchestration & API Integration:** End-to-end retrieval orchestration targeting 100 eligible works, deterministic ordering/pagination, internal FastAPI dependency injection wiring (no temporary public candidate-preview endpoint; public endpoint follows in Milestone 5.3), and structured candidate sets.
+  - **5.2.6 Testing & Performance Validation:** Unit and PostgreSQL/pgvector integration tests, cold-start and sparse-catalogue scenarios, concurrent retrieval, `EXPLAIN` query-plan/index verification, and latency/recall benchmarking.
 - Integrate the local embedding model behind the embedding interface.
 - Benchmark the candidate 384-dimensional model on representative book and query text.
 - Store embeddings with model/revision metadata.

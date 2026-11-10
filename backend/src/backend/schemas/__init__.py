@@ -7,13 +7,35 @@ from backend.schemas.profile import (
     ResolvedWorkSignal,
     TopicAffinityEntry,
 )
+from backend.schemas.retrieval import (
+    CandidateBook,
+    CandidateEligibilityInfo,
+    CandidatePoolResult,
+    CandidateWorkMetadata,
+    EligibilityPolicy,
+    RecommendationRequestType,
+    RetrievalRequestContext,
+    RetrievalSource,
+    SemanticRetrievalStatus,
+    UserBookLifecycleStatus,
+)
 
 __all__ = [
-    "ExtractedInteractionSignal",
-    "ResolvedWorkSignal",
+    "CandidateBook",
+    "CandidateEligibilityInfo",
+    "CandidatePoolResult",
+    "CandidateWorkMetadata",
+    "EligibilityPolicy",
     "ExplicitPreferenceInput",
-    "TopicAffinityEntry",
+    "ExtractedInteractionSignal",
     "InferredTopicsPayload",
     "ProfileCalculationResult",
     "ProfileRefreshResult",
+    "RecommendationRequestType",
+    "ResolvedWorkSignal",
+    "RetrievalRequestContext",
+    "RetrievalSource",
+    "SemanticRetrievalStatus",
+    "TopicAffinityEntry",
+    "UserBookLifecycleStatus",
 ]

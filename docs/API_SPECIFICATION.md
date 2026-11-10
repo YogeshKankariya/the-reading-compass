@@ -578,7 +578,7 @@ Supported request types for the MVP:
 - `mood_based`
 - `new_author`
 
-The backend validates the request, loads the reader profile, generates candidates, applies filters, scores and ranks candidates, diversifies the list, creates reason codes, and persists the result.
+The backend validates the request, loads the reader profile, generates candidates (wired internally via FastAPI dependency injection without a separate public candidate endpoint), applies filters, scores and ranks candidates, diversifies the list, creates reason codes, and persists the result. When evaluating `filters`, `language` matches `BookWork.original_language`, `max_pages` is edition-aware via `BookEdition.page_count`, and missing metadata does not exclude works unless the corresponding filter is explicitly requested.
 
 ### 11.2 Recommendation response
 

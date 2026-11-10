@@ -170,14 +170,14 @@ Stores explicit, editable preferences. A row can represent a preference category
 |---|---|---|
 | `id` | UUID | Primary key |
 | `user_id` | UUID | FK → `users.id` |
-| `preference_type` | VARCHAR(40) | For example: `genre`, `subject`, `language`, `length`, `difficulty`, `goal` |
+| `preference_type` | VARCHAR(40) | For example: `genre`, `subject`, `author`, `language`, `length`, `difficulty`, `goal` |
 | `preference_value` | TEXT | Selected value |
 | `preference_weight` | NUMERIC(4,3) | Optional strength, constrained to 0–1 |
 | `source` | VARCHAR(20) | `onboarding` or `user_edit` |
 | `created_at` | TIMESTAMPTZ | Creation time |
 | `updated_at` | TIMESTAMPTZ | Last update |
 
-Use a unique constraint appropriate to the chosen preference model, such as (`user_id`, `preference_type`, `preference_value`). Keep explicit preferences distinct from inferred preferences so the user can inspect and override them.
+Use a unique constraint appropriate to the chosen preference model, such as (`user_id`, `preference_type`, `preference_value`). Keep explicit preferences distinct from inferred preferences so the user can inspect and override them. Because `preference_value` stores a text label/slug/UUID rather than a foreign key, retrieval resolves genre, subject, and author preferences against controlled catalogue tables (`genres`, `subjects`, `authors`)—with author matching performing UUID lookup against `authors.id` or exact match against `authors.normalized_name` (no fuzzy matching). Negative preference support (`excluded_author`, `excluded_subject`) is deferred beyond Milestone 5.2 (no prefix conventions or schema changes added yet).
 
 ## 6. Book catalogue
 
@@ -695,6 +695,7 @@ Constraints and behavior:
   ON book_embeddings
   USING hnsw (embedding vector_cosine_ops);
   ```
+  *(Retrieval note: Because this index covers all rows regardless of `is_active`, `model_name`, and `model_revision`, semantic candidate queries filter post-scan and rely on bounded oversampling/expansion or iterative scanning; if multi-revision embedding history grows large, evaluate a partial HNSW index `WHERE is_active = true`).*
 - Work-level representation: Embeddings are generated per canonical work, not per physical edition.
 - Deployment prerequisites: Requires the `vector` extension in PostgreSQL (`CREATE EXTENSION IF NOT EXISTS vector;`). In production or managed cloud databases (RDS, Cloud SQL), the database user or migration role must have extension creation privileges, or the extension must be pre-enabled by an administrator.
 

@@ -354,35 +354,75 @@ Orchestration is coordinated by `ProfileService`:
 
 ## 7. Candidate generation
 
-Candidate generation finds a manageable pool of potentially relevant works. Ranking then orders that pool.
+Candidate generation finds a manageable pool of potentially relevant works (**initial target: 100 unique eligible `BookWork` candidates per retrieval request**). Ranking then orders that pool in a separate stage (Milestone 5.3).
 
-Use multiple retrieval paths and combine their results.
+Use multiple deterministic retrieval paths and combine their results, keeping candidate retrieval, merging, and eligibility filtering strictly decoupled from final recommendation scoring or LLM logic.
+
+### 7.0 Candidate representation contract (`CandidateBook`)
+
+All retrieval channels produce normalized candidate records keyed by `work_id`, retaining complete multi-channel provenance without attaching final recommendation scores:
+
+- `work_id` (`UUID`): Canonical `BookWork` identifier (used for strict deduplication).
+- `retrieval_sources` (`set[str] | list[str]`): Provenance tags from contributing channels (e.g., `semantic`, `explicit_genre`, `explicit_subject`, `explicit_author`, `inferred_genre`, `inferred_subject`, `cold_start_baseline`).
+- `semantic_distance` (`float | None`): Raw pgvector cosine distance ($\text{embedding} \Leftrightarrow p_u \in [0.0, 2.0]$) populated only when retrieved via the semantic channel.
+- `matched_genres` (`list[UUID]`): Distinct matched `Genre.id` values from explicit or inferred topic paths.
+- `matched_subjects` (`list[UUID]`): Distinct matched `Subject.id` values from explicit or inferred topic paths.
+- `matched_authors` (`list[UUID]`): Distinct matched `Author.id` values from supported explicit author preferences.
+- `eligibility` (`CandidateEligibilityInfo`): Structured eligibility state (e.g., `is_eligible`, exclusion reasons if evaluated during audit/debug, library status context).
+- `work_metadata` (`CandidateWorkMetadata`): Relevant `BookWork` attributes (`canonical_title`, `subtitle`, `original_language`, `first_published_year`, `difficulty_level`, `estimated_reading_minutes`, `cover_image_url`, `metadata_status`, author display summary, genre/subject IDs).
 
 ### 7.1 Semantic retrieval
 
-Use pgvector to retrieve works whose embeddings are close to:
+Use pgvector cosine distance (`<=>`) over `book_embeddings` against `UserInterestProfile.interest_vector`:
 
-- The reader's interest vector.
-- A natural-language query embedding.
-- A goal or subject embedding.
-- An embedding of a book the reader liked, when relevant.
-
-Semantic retrieval helps discover books with related ideas even when they do not share exact keywords.
+1. **Preconditions & Cold-Start Bypass:**
+   - If `UserInterestProfile` is missing, `interest_vector IS NULL`, or `PROFILE_EMBEDDING_MODEL_REVISION` is unset (`None`), **do not execute a vector query**; skip the semantic channel and emit typed retrieval status (`cold_start_no_vector` or `revision_unspecified`).
+   - **Model/Revision Compatibility Check:** If the cached `profile.model_name` or `profile.model_revision` disagrees with the active configured model/revision, do **not** compute cross-model vector distances. Skip semantic retrieval (and optionally flag/schedule an asynchronous profile refresh) so mismatched embedding spaces are never mixed.
+2. **Exact Query & Compatibility Filtering:**
+   ```sql
+   SELECT be.work_id, (be.embedding <=> :profile_vector) AS semantic_distance
+   FROM book_embeddings be
+   WHERE be.is_active = true
+     AND be.model_name = :model_name
+     AND be.model_revision = :model_revision
+   ORDER BY semantic_distance ASC, be.work_id ASC
+   LIMIT :fetch_limit;
+   ```
+   - `uq_book_embeddings_active_work` guarantees at most one active embedding per `(work_id, model_name, model_revision)`.
+   - Tie-breaking on `be.work_id ASC` guarantees deterministic ordering when distances match.
+3. **Indexing & Query Plan Behavior:**
+   - The schema provides `ix_book_embeddings_hnsw` (`USING hnsw (embedding vector_cosine_ops)`).
+   - **Scale / Over-filtering Note:** Because `ix_book_embeddings_hnsw` currently indexes all `book_embeddings` rows globally (including `is_active = false` and legacy revisions), applying `WHERE is_active = true AND model_name = ... AND model_revision = ...` after an HNSW index scan can return fewer rows than `:fetch_limit` when deactivated revisions exist ("HNSW post-filtering loss"). Milestone 5.2 mitigates this without schema migrations via bounded oversampling (`2x`–`8x` expansion) and metadata backfill; adding a partial HNSW index (`WHERE is_active = true`) or configuring pgvector iterative scan (`hnsw.iterative_scan`) is recommended when multi-revision history grows.
 
 ### 7.2 Metadata retrieval
 
-Retrieve candidates using structured filters and relationships:
+Retrieve deterministic candidates using controlled catalogue relationships (`BookWorkGenre`, `BookWorkSubject`, `BookWorkAuthor`) and explicit/inferred user preferences, keeping explicit user preferences (`UserPreference`) strictly distinct from inferred profile topics (`UserInterestProfile.inferred_topics`):
 
-- Selected genres and subjects.
-- Preferred language.
-- Reading difficulty.
-- Length constraints.
-- Author exclusions or author discovery constraints.
-- Subject relationships relevant to a learning goal.
+1. **Explicit preference channels (`user_preferences`):**
+   - **Genres (`preference_type = 'genre'`):** Resolve `preference_value` cleanly against `genres.id` (UUID string), `genres.slug`, or case-insensitive `genres.name`; join `book_work_genres` (indexed on `ix_book_work_genres_genre_id`).
+   - **Subjects (`preference_type = 'subject'`):** Resolve `preference_value` cleanly against `subjects.id` (UUID string), `subjects.slug`, or case-insensitive `subjects.name`; join `book_work_subjects` (indexed on `ix_book_work_subjects_subject_id`), ordering by `preference_weight * COALESCE(relevance_weight, 1.0)`.
+   - **Authors (`preference_type = 'author'`):**
+     1. Attempt UUID resolution against `authors.id`.
+     2. If the value is not a valid UUID, normalize it (lowercase, trimmed, whitespace-collapsed) and perform an **exact** match against `authors.normalized_name` (`ix_authors_normalized_name`).
+     3. Do **not** use fuzzy matching.
+     4. Safely ignore ambiguous matches (multiple distinct authors matching one normalized name) or unresolved values; never pick an arbitrary author.
+   - **Deferred Exclusions:** Explicit negative preferences (`excluded_author`, `excluded_subject`) are deferred; do not introduce `preference_type` prefix conventions or schema changes in Milestone 5.2.
+   - Works matching multiple explicit preferences retain all matched IDs (`matched_genres`, `matched_subjects`, `matched_authors`) and all provenance labels.
+2. **Inferred topic channels (`user_interest_profiles.inferred_topics`):**
+   - Extract top-$N$ inferred genre UUIDs (`inferred_topics["genres"]`) and subject UUIDs (`inferred_topics["subjects"]`) ordered by normalized affinity descending, skipping topics below a minimum affinity threshold.
+   - Query `book_work_genres` and `book_work_subjects` directly by UUID, tagging provenance as `inferred_genre` / `inferred_subject` (separate from `explicit_genre` / `explicit_subject`).
+3. **Cold-start handling (`interest_vector IS NULL`):**
+   - When the profile vector is null, rely deterministically on the explicit preference channels above (plus any available inferred topics from un-embedded works).
+   - **Zero-preference fallback:** When a cold-start user has neither explicit preferences (`user_preferences`) nor inferred topics (`inferred_topics`), execute a deterministic baseline catalogue retrieval query over eligible `book_works` (e.g., prioritizing `metadata_status = 'verified'`, ordered deterministically by `(metadata_status = 'verified' DESC, created_at DESC, id ASC)`).
+4. **Hard request metadata filters:**
+   - **Language filtering:** Matches `BookWork.original_language`.
+   - **Page-count filtering:** Edition-aware via the `BookEdition` relationship (`BookEdition.page_count`, matching works that have an edition with a non-null `page_count` satisfying requested bounds).
+   - **Difficulty filtering:** Matches `BookWork.difficulty_level`.
+   - **Missing metadata rule:** Missing `original_language` or missing `BookEdition.page_count` must **not** exclude a work unless the corresponding filter was explicitly requested. Never exclude a work solely because `BookWork.metadata_status == 'unverified'`.
 
 ### 7.3 Text retrieval
 
-Use PostgreSQL full-text and trigram search for title, author, and topic queries. This is especially important for exact-title searches, misspellings, and names that semantic search may not handle precisely.
+Use PostgreSQL full-text and trigram search for title, author, and topic queries (used for query-driven retrieval in search and future `mood_based` / natural-language query contexts).
 
 ### 7.4 Exploration candidates
 
@@ -395,27 +435,33 @@ A small exploration pool can introduce:
 
 Exploration must remain relevant to the request. Random books should not be inserted merely to increase diversity.
 
-### 7.5 Candidate union and deduplication
+### 7.5 Candidate union, deduplication, and bounded expansion
 
-Combine candidate IDs from retrieval paths, deduplicate by canonical `work_id`, and retain retrieval metadata such as source and retrieval score.
-
-An initial MVP may retrieve a few hundred candidates, then filter and rank them down to the requested result count. Tune pool size with latency and recall measurements.
+1. **Union and Deduplication:** Combine results from all executed channels in memory, deduplicating strictly by canonical `work_id`. When a work is returned by multiple channels, merge its `retrieval_sources`, preserve its minimum non-null `semantic_distance`, and union `matched_genres`, `matched_subjects`, and `matched_authors`.
+2. **100-Candidate Target & Bounded Expansion:**
+   - Retrieval targets **100 unique eligible `BookWork` candidates** (`CANDIDATE_TARGET_COUNT = 100`).
+   - Because post-retrieval eligibility filtering (Section 8) can remove user library works or dismissed items, retrieval uses an initial over-fetch multiplier (e.g., `2x` = 200 per channel) and a **bounded expansion loop** (e.g., escalating fetch limits `200 -> 400 -> 800`, capped at `CANDIDATE_MAX_EXPANSION_LIMIT`) if fewer than 100 unique eligible candidates remain after filtering.
+   - **Honest Sparse-Catalogue Semantics:** If the catalogue contains fewer than 100 unique eligible works after maximum expansion (or when bounded TBR pools have `< 100` items), return the exact available candidates and actual count. Never fabricate candidates or relax hard eligibility rules to pad the pool to 100.
 
 ## 8. Filtering and eligibility
 
-Apply hard constraints before ranking.
+Eligibility filtering operates **independently** of retrieval channels on deduplicated candidates (or via request-scoped pre-filters where mandatory, such as `tbr_priority`).
 
-Typical rules:
+### 8.1 Finalized Eligibility Matrix by Library / Feedback State
 
-1. Exclude works already completed when the request is “what should I read next,” unless the user asks for rereads.
-2. Exclude works the user explicitly dismissed for the current context, subject to a configurable expiry or override.
-3. For TBR prioritization, only consider works in the user's TBR list.
-4. Respect language and other explicit hard filters.
-5. Exclude unavailable or invalid catalogue records.
-6. Avoid recommending a work already being read unless the request asks for a continuation or alternative.
-7. Do not exclude a work solely because it has incomplete metadata if it can still be evaluated safely.
+| User State / Catalogue Condition | `next_read` / `goal_based` / `mood_based` / `new_author` | `discover` | `tbr_priority` | Configurable Policy Override / Notes |
+|---|---|---|---|---|
+| **Completed (`UserBook.status = 'completed'`)** | **Exclude** | **Exclude** | **Exclude** | Include only if explicit `allow_rereads=True`. |
+| **Currently Reading (`status = 'currently_reading'`)** | **Exclude** | **Exclude** | **Exclude** | Avoid recommending active reads unless continuation requested (`include_in_progress=True`). |
+| **Paused (`status = 'paused'`)** | **Exclude** | **Exclude** | **Exclude** | Excluded by default (`include_paused=False`); preserved for future explicit continuation policies. |
+| **Abandoned (`status = 'abandoned'`)** | **Exclude** | **Exclude** | **Exclude** | Excluded by default (`include_abandoned=False`); preserved for future explicit reconsideration policies. |
+| **TBR (`status = 'want_to_read'`)** | **Include** (`next_read`) | **Exclude** | **Required (Exclusive pool)** | `next_read` includes TBR by default; `discover` excludes TBR by default (`exclude_tbr=True`). Both configurable via request context or `EligibilityPolicy`. |
+| **Dismissed (`RecommendationItem.feedback_type = 'dismiss'`)** | **Exclude within 90-day cooldown** | **Exclude within 90-day cooldown** | **Exclude within 90-day cooldown** | Default cooldown `90` days using `COALESCE(feedback_at, created_at)`. Eligible again once cooldown expires if no other exclusion applies (no permanent exclusion). |
+| **Catalogue Metadata Status (`BookWork.metadata_status`)** | **Include `'unverified'`, `'verified'`, `'needs_review'`** | **Include `'unverified'`, `'verified'`, `'needs_review'`** | **Include** | Never exclude a work solely because `metadata_status == 'unverified'`. Exclude only records lacking `canonical_title` or explicit hard-filter mismatches. |
+| **Missing `original_language` / `BookEdition.page_count`** | **Include unless filtered** | **Include unless filtered** | **Include unless filtered** | Missing metadata never excludes a work unless the corresponding filter was explicitly requested. |
+| **Same Author (`new_author` request only)** | **Exclude authors in user's `UserBook` or positive `BookRating` history** | N/A | N/A | Applied when `request_type == 'new_author'`. |
 
-Filtering rules should vary by request type. For example, a discovery request may include books not yet in the user's library, while a TBR request must not introduce new books into the ranked list.
+Filtering rules vary by request type (`next_read`, `discover`, `tbr_priority`, `goal_based`, `mood_based`, `new_author`). For `tbr_priority`, eligibility **must never** introduce works outside the user's `want_to_read` entries.
 
 ## 9. Hybrid ranking model
 
@@ -799,10 +845,10 @@ Keep the engine modular within the FastAPI backend.
 
 | Component | Responsibility |
 |---|---|
-| `ReaderProfileService` | Build and retrieve explicit/inferred reader features |
+| `ReaderProfileService` (`ProfileService`) | Build, refresh, and retrieve explicit/inferred reader features (`services/profile/`) |
 | `BookRepresentationService` | Construct versioned text documents and embeddings |
-| `CandidateRetrievalService` | Semantic, metadata, and text retrieval |
-| `EligibilityFilterService` | Apply request-specific exclusions and constraints |
+| `CandidateRetrievalService` | Orchestrate semantic (`SemanticRetriever`), metadata/cold-start (`MetadataRetriever`), candidate union/deduplication, and bounded expansion (`services/retrieval/`) |
+| `EligibilityFilterService` | Apply independent request-specific exclusions, library rules, and catalogue integrity checks |
 | `RecommendationScoringService` | Calculate normalized feature scores |
 | `DiversificationService` | Apply MMR and list-level constraints |
 | `TBRPrioritizationService` | Rank only the user's TBR set |
@@ -824,6 +870,8 @@ The detailed endpoint contract belongs in `API_SPECIFICATION.md`. At a high leve
 
 Each recommendation response should expose stable work identifiers, rank, grounded reasons, and optional score details. Do not expose private internal profile data unnecessarily.
 
+In Milestone 5.2, candidate retrieval services are wired cleanly through internal FastAPI dependency injection without exposing a temporary public candidate-preview endpoint; public recommendation endpoints (`POST /recommendations`) are delivered in Milestone 5.3 alongside ranking and diversification.
+
 ## 20. Testing strategy
 
 Test the recommendation engine at multiple levels.
@@ -842,9 +890,11 @@ Test the recommendation engine at multiple levels.
 
 ### Integration tests
 
-- pgvector candidate retrieval.
+- pgvector candidate retrieval (including exact model/revision filtering and `EXPLAIN` index/query-plan checks).
+- Cold-start (null vector) and sparse-catalogue bounded expansion scenarios.
+- Concurrent multi-user candidate retrieval isolation.
 - Full-text and trigram search.
-- Candidate union and work-level deduplication.
+- Candidate union, provenance preservation, and work-level deduplication.
 - Recommendation persistence.
 - TBR-only ranking.
 - Recommendation feedback updates.

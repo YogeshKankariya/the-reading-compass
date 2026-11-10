@@ -1,7 +1,7 @@
 import math
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +39,17 @@ class Settings(BaseSettings):
     PROFILE_WEIGHT_RECOMMENDATION_CLICK: float = 0.15
     PROFILE_WEIGHT_CLICK: float = 0.10
     PROFILE_WEIGHT_VIEW: float = 0.05
+
+    # Candidate retrieval configuration (Milestone 5.2)
+    CANDIDATE_TARGET_COUNT: int = 100
+    RETRIEVAL_SEMANTIC_INITIAL_LIMIT: int = 200
+    RETRIEVAL_METADATA_INITIAL_LIMIT: int = 200
+    RETRIEVAL_METADATA_TOPIC_TOP_N: int = 10
+    RETRIEVAL_MIN_INFERRED_TOPIC_AFFINITY: float = 0.05
+    RETRIEVAL_EXPANSION_MULTIPLIER: float = 2.0
+    RETRIEVAL_MAX_EXPANSION_LIMIT: int = 800
+    RETRIEVAL_MAX_EXPANSION_STEPS: int = 3
+    RETRIEVAL_DISMISSAL_COOLDOWN_DAYS: int = 90
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -119,6 +130,67 @@ class Settings(BaseSettings):
         if v is not None and not v.strip():
             return None
         return v
+
+    @field_validator(
+        "CANDIDATE_TARGET_COUNT",
+        "RETRIEVAL_SEMANTIC_INITIAL_LIMIT",
+        "RETRIEVAL_METADATA_INITIAL_LIMIT",
+        "RETRIEVAL_METADATA_TOPIC_TOP_N",
+        "RETRIEVAL_MAX_EXPANSION_LIMIT",
+        "RETRIEVAL_MAX_EXPANSION_STEPS",
+        "RETRIEVAL_DISMISSAL_COOLDOWN_DAYS",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_retrieval_ints(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("Retrieval integer settings cannot be boolean values")
+        return v
+
+    @field_validator(
+        "CANDIDATE_TARGET_COUNT",
+        "RETRIEVAL_SEMANTIC_INITIAL_LIMIT",
+        "RETRIEVAL_METADATA_INITIAL_LIMIT",
+        "RETRIEVAL_METADATA_TOPIC_TOP_N",
+        "RETRIEVAL_MAX_EXPANSION_LIMIT",
+        "RETRIEVAL_MAX_EXPANSION_STEPS",
+        "RETRIEVAL_DISMISSAL_COOLDOWN_DAYS",
+    )
+    @classmethod
+    def validate_positive_retrieval_ints(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Retrieval limits and cooldown settings must be positive integers (>= 1)")
+        return v
+
+    @field_validator("RETRIEVAL_MIN_INFERRED_TOPIC_AFFINITY")
+    @classmethod
+    def validate_min_inferred_topic_affinity(cls, v: float) -> float:
+        if not math.isfinite(v) or not (0.0 <= v <= 1.0):
+            raise ValueError("RETRIEVAL_MIN_INFERRED_TOPIC_AFFINITY must be a finite number between 0.0 and 1.0")
+        return v
+
+    @field_validator("RETRIEVAL_EXPANSION_MULTIPLIER")
+    @classmethod
+    def validate_expansion_multiplier(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 1.0:
+            raise ValueError("RETRIEVAL_EXPANSION_MULTIPLIER must be a finite number strictly greater than 1.0")
+        return v
+
+    @model_validator(mode="after")
+    def validate_retrieval_expansion_bounds(self) -> "Settings":
+        if self.RETRIEVAL_MAX_EXPANSION_LIMIT < self.CANDIDATE_TARGET_COUNT:
+            raise ValueError(
+                "RETRIEVAL_MAX_EXPANSION_LIMIT must be >= CANDIDATE_TARGET_COUNT"
+            )
+        if self.RETRIEVAL_MAX_EXPANSION_LIMIT < self.RETRIEVAL_SEMANTIC_INITIAL_LIMIT:
+            raise ValueError(
+                "RETRIEVAL_MAX_EXPANSION_LIMIT must be >= RETRIEVAL_SEMANTIC_INITIAL_LIMIT"
+            )
+        if self.RETRIEVAL_MAX_EXPANSION_LIMIT < self.RETRIEVAL_METADATA_INITIAL_LIMIT:
+            raise ValueError(
+                "RETRIEVAL_MAX_EXPANSION_LIMIT must be >= RETRIEVAL_METADATA_INITIAL_LIMIT"
+            )
+        return self
 
     def get_signal_weights(self) -> dict[str, float]:
         """Return a mapping of interaction signal identifiers to their configured weights."""
