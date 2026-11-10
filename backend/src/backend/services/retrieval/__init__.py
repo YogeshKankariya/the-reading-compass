@@ -24,6 +24,7 @@ from backend.services.retrieval.interfaces import (
     SemanticRetrievalBatch,
     SemanticRetrieverProtocol,
 )
+from backend.services.retrieval.semantic_retriever import SemanticRetriever
 
 __all__ = [
     "CandidateBook",
@@ -44,6 +45,7 @@ __all__ = [
     "SemanticCandidateHit",
     "SemanticRetrievalBatch",
     "SemanticRetrievalStatus",
+    "SemanticRetriever",
     "SemanticRetrieverProtocol",
     "UserBookLifecycleStatus",
 ]
