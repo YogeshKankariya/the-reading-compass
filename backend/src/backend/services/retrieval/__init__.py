@@ -24,6 +24,10 @@ from backend.services.retrieval.interfaces import (
     SemanticRetrievalBatch,
     SemanticRetrieverProtocol,
 )
+from backend.services.retrieval.metadata_retriever import (
+    MetadataRetriever,
+    normalize_author_name,
+)
 from backend.services.retrieval.semantic_retriever import SemanticRetriever
 
 __all__ = [
@@ -38,6 +42,7 @@ __all__ = [
     "EligibilityPolicy",
     "MetadataCandidateHit",
     "MetadataRetrievalBatch",
+    "MetadataRetriever",
     "MetadataRetrieverProtocol",
     "RecommendationRequestType",
     "RetrievalRequestContext",
@@ -48,4 +53,5 @@ __all__ = [
     "SemanticRetriever",
     "SemanticRetrieverProtocol",
     "UserBookLifecycleStatus",
+    "normalize_author_name",
 ]
