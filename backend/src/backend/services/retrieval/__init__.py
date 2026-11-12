@@ -13,6 +13,9 @@ from backend.schemas.retrieval import (
     UserBookLifecycleStatus,
 )
 from backend.services.retrieval.candidate_merger import CandidateMerger
+from backend.services.retrieval.candidate_retrieval_service import (
+    CandidateRetrievalService,
+)
 from backend.services.retrieval.eligibility_filter import (
     EXCLUSION_ABANDONED,
     EXCLUSION_COMPLETED,
@@ -51,6 +54,7 @@ __all__ = [
     "CandidateMerger",
     "CandidateMergerProtocol",
     "CandidatePoolResult",
+    "CandidateRetrievalService",
     "CandidateRetrievalServiceProtocol",
     "CandidateWorkMetadata",
     "EXCLUSION_ABANDONED",

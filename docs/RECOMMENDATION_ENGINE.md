@@ -440,8 +440,13 @@ Exploration must remain relevant to the request. Random books should not be inse
 1. **Union and Deduplication:** Combine results from all executed channels in memory, deduplicating strictly by canonical `work_id`. When a work is returned by multiple channels, merge its `retrieval_sources`, preserve its minimum non-null `semantic_distance`, and union `matched_genres`, `matched_subjects`, and `matched_authors`.
 2. **100-Candidate Target & Bounded Expansion:**
    - Retrieval targets **100 unique eligible `BookWork` candidates** (`CANDIDATE_TARGET_COUNT = 100`).
-   - Because post-retrieval eligibility filtering (Section 8) can remove user library works or dismissed items, retrieval uses an initial over-fetch multiplier (e.g., `2x` = 200 per channel) and a **bounded expansion loop** (e.g., escalating fetch limits `200 -> 400 -> 800`, capped at `CANDIDATE_MAX_EXPANSION_LIMIT`) if fewer than 100 unique eligible candidates remain after filtering.
+   - Because post-retrieval eligibility filtering (Section 8) can remove user library works or dismissed items, retrieval uses an initial over-fetch multiplier (e.g., `2x` = 200 per channel) and a **bounded expansion loop** (e.g., escalating fetch limits `200 -> 400 -> 800`, capped at `RETRIEVAL_MAX_EXPANSION_LIMIT` and `RETRIEVAL_MAX_EXPANSION_STEPS`) if fewer than 100 unique eligible candidates remain after filtering.
    - **Honest Sparse-Catalogue Semantics:** If the catalogue contains fewer than 100 unique eligible works after maximum expansion (or when bounded TBR pools have `< 100` items), return the exact available candidates and actual count. Never fabricate candidates or relax hard eligibility rules to pad the pool to 100.
+3. **Cold-Start Mode Semantics in `CandidatePoolResult`:**
+   `CandidatePoolResult.cold_start_mode` (`bool`) accurately indicates whether candidate generation operated under a cold-start regime for the user request:
+   - **Genuinely missing interest vector (`semantic_status == "cold_start_no_vector"`):** The user has no `UserInterestProfile` record or `interest_vector IS NULL` (brand-new user or user with zero vector-eligible interaction history). Semantic retrieval cannot execute due to lack of a vector, and `cold_start_mode = True`.
+   - **Catalogue baseline fallback (`used_cold_start_baseline is True`):** Metadata retrieval had to fall back to the generic verified catalogue baseline (`retrieval_sources = ("cold_start_baseline",)`) because the user possessed zero usable explicit preferences and zero inferred topics. Sets `cold_start_mode = True`.
+   - **Vector exists but semantic retrieval bypassed (`revision_unspecified` or `model_mismatch`):** The user possesses an established profile and a non-null `interest_vector`, but semantic pgvector retrieval was safely bypassed due to unpinned server revision configuration (`PROFILE_EMBEDDING_MODEL_REVISION is None`) or model/revision migration mismatch. In these cases, the user is **not** a cold-start reader; metadata retrieval personalizes candidates using their explicit preferences or inferred topic affinities, and `cold_start_mode = False` (unless the user also lacks any explicit preferences or inferred topics, in which case metadata retrieval falls back to the baseline and sets `cold_start_mode = True`).
 
 ## 8. Filtering and eligibility
 
@@ -870,7 +875,7 @@ The detailed endpoint contract belongs in `API_SPECIFICATION.md`. At a high leve
 
 Each recommendation response should expose stable work identifiers, rank, grounded reasons, and optional score details. Do not expose private internal profile data unnecessarily.
 
-In Milestone 5.2, candidate retrieval services are wired cleanly through internal FastAPI dependency injection without exposing a temporary public candidate-preview endpoint; public recommendation endpoints (`POST /recommendations`) are delivered in Milestone 5.3 alongside ranking and diversification.
+In Milestone 5.2, candidate retrieval services (`CandidateRetrievalService`) are wired cleanly through internal FastAPI dependency injection (`get_candidate_retrieval_service` in `api/dependencies.py` reusing `get_db` and `get_settings`) without exposing a temporary public candidate-preview endpoint; public recommendation endpoints (`POST /recommendations`) are delivered in Milestone 5.3 alongside ranking and diversification.
 
 ## 20. Testing strategy
 

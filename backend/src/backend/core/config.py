@@ -215,3 +215,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Return the application Settings instance for FastAPI dependency injection."""
+    return settings
